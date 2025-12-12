@@ -28,3 +28,7 @@ envs/curobo/*
 
 /*.json*
 /*.txt
+
+attention_maps
+cache
+tmp
