@@ -24,6 +24,10 @@ class lift_pot(Base_Task):
         )
         x, y = self.pot.get_pose().p[0], self.pot.get_pose().p[1]
         self.prohibited_area.append([x - 0.3, y - 0.1, x + 0.3, y + 0.1])
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        self.set_target_objects({"pot": self.pot})
+        self.set_current_target("pot")
 
     def play_once(self):
         left_arm_tag = ArmTag("left")

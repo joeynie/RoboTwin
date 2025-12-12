@@ -65,9 +65,18 @@ class place_can_basket(Base_Task):
         self.add_prohibit_area(self.can, padding=0.1)
         self.add_prohibit_area(self.basket, padding=0.05)
         self.object_start_height = self.can.get_pose().p[2]
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        self.set_target_objects({
+            "can": self.can,          # Object to be grasped and placed
+            "basket": self.basket     # Target container for placement
+        })
+        # Initially focus on can (the object to be grasped first)
+        self.set_current_target("can")
 
     def play_once(self):
-        # Grasp the can with the specified arm
+        # Phase 1: Grasp the can with the specified arm
+        self.set_current_target("can")
         self.move(self.grasp_actor(self.can, arm_tag=self.arm_tag, pre_grasp_dis=0.05))
 
         # Determine the appropriate placement pose based on proximity to functional points of the basket
@@ -83,7 +92,8 @@ class place_can_basket(Base_Task):
             place_pose[:2] = f1[:2]
             place_pose[3:] = ((-1, 0, 0, 0) if self.arm_tag == "left" else (0.05, 0, 0, 0.99))
 
-        # Place the can at the selected position into the basket
+        # Phase 2: Place the can at the selected position into the basket - focus on basket
+        self.set_current_target("basket")
         self.move(
             self.place_actor(
                 self.can,

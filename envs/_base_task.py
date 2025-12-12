@@ -464,6 +464,41 @@ class Base_Task(gym.Env):
             actor_segmentation = self.cameras.get_segmentation(level="actor")
             for camera_name in actor_segmentation.keys():
                 pkl_dic["observation"][camera_name].update(actor_segmentation[camera_name])
+            
+            # Also save raw segmentation labels for target object mask extraction
+            actor_seg_raw = self.cameras.get_segmentation(level="actor", return_raw_label=True)
+            # for camera_name in actor_seg_raw.keys():
+            #     pkl_dic["observation"][camera_name]["actor_segmentation_raw"] = actor_seg_raw[camera_name]["actor_segmentation"]
+            
+            # Save target object masks 
+            if hasattr(self, 'target_objects') and self.target_objects:
+                target_masks = self._get_target_object_masks(actor_seg_raw)
+                pkl_dic["target_masks"] = target_masks
+                
+                # Save current target information for dynamic target switching
+                current_target = getattr(self, 'current_target', None)
+                pkl_dic["current_target"] = current_target
+                
+                # Save current target mask(s) separately for convenience
+                if current_target:
+                    pkl_dic["current_target_mask"] = {}
+                    # Handle both single target (str) and multiple targets (list)
+                    target_names = [current_target] if isinstance(current_target, str) else current_target
+                    for camera_name in target_masks.keys():
+                        # Combine masks for all target objects (using logical OR)
+                        combined_mask = None
+                        for target_name in target_names:
+                            if target_name in target_masks[camera_name]:
+                                if combined_mask is None:
+                                    combined_mask = target_masks[camera_name][target_name]
+                                else:
+                                    combined_mask = np.logical_or(combined_mask, target_masks[camera_name][target_name]).astype(np.uint8)
+                        if combined_mask is not None:
+                            pkl_dic["current_target_mask"][camera_name] = combined_mask
+                
+                # Save gripper masks
+                gripper_masks = self._get_gripper_masks(actor_seg_raw)
+                pkl_dic["gripper_mask"] = gripper_masks
         # depth
         if self.data_type.get("depth", False):
             depth = self.cameras.get_depth()
@@ -498,6 +533,127 @@ class Base_Task(gym.Env):
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
+
+    def _get_target_object_masks(self, actor_seg_raw):
+        """
+        Extract binary masks for target objects from raw segmentation labels.
+        
+        Args:
+            actor_seg_raw: Raw segmentation labels from cameras {camera_name: {actor_segmentation: np.array}}
+        
+        Returns:
+            dict: Target object masks for each camera and each target object
+                  Format: {camera_name: {object_name: binary_mask}}
+        """
+        target_masks = {}
+        
+        for camera_name, seg_data in actor_seg_raw.items():
+            raw_seg = seg_data["actor_segmentation"]
+            target_masks[camera_name] = {}
+            
+            for obj_name, obj_actor in self.target_objects.items():
+                obj_id = self._get_actor_per_scene_id(obj_actor)
+                
+                if obj_id is not None:
+                    # Create binary mask where target object pixels are 1
+                    binary_mask = (raw_seg == obj_id).astype(np.uint8)
+                    target_masks[camera_name][obj_name] = binary_mask
+        
+        return target_masks
+
+    def _get_actor_per_scene_id(self, obj_actor):
+        """
+        Get the per_scene_id from various types of actor objects.
+        
+        Args:
+            obj_actor: Can be sapien.Entity, Actor wrapper, or Articulation
+        
+        Returns:
+            int: The per_scene_id, or None if not found
+        """
+        obj_id = None
+        
+        # 1. Direct Entity (sapien.Entity)
+        if hasattr(obj_actor, 'get_per_scene_id'):
+            obj_id = obj_actor.get_per_scene_id()
+        # 2. Actor wrapper class (has .actor attribute which is the Entity)
+        elif hasattr(obj_actor, 'actor') and hasattr(obj_actor.actor, 'get_per_scene_id'):
+            obj_id = obj_actor.actor.get_per_scene_id()
+        # 3. Articulation (has .entity attribute)
+        elif hasattr(obj_actor, 'entity') and hasattr(obj_actor.entity, 'get_per_scene_id'):
+            obj_id = obj_actor.entity.get_per_scene_id()
+        
+        return obj_id
+
+    def set_target_objects(self, target_objects: dict):
+        """
+        Set the target objects for mask extraction.
+        
+        Args:
+            target_objects: Dictionary of target objects {name: actor}
+                           e.g., {"object": self.object, "target": self.target_object}
+        """
+        self.target_objects = target_objects
+        # Initialize current_target to first object if not set
+        if not hasattr(self, 'current_target') or self.current_target is None:
+            self.current_target = list(target_objects.keys())[0] if target_objects else None
+
+    def set_current_target(self, target_name: str | list):
+        """
+        Set the current active target object(s) for attention/mask focus.
+        This is useful for tasks that need to switch attention between objects.
+        
+        Args:
+            target_name: Name of the target object (must be in target_objects dict)
+                        or a list of target names to focus on multiple objects simultaneously
+        """
+        if isinstance(target_name, list):
+            # Support multiple targets
+            for name in target_name:
+                if not (hasattr(self, 'target_objects') and name in self.target_objects):
+                    print(f"Warning: target '{name}' not found in target_objects")
+            self.current_target = target_name
+        else:
+            # Single target
+            if hasattr(self, 'target_objects') and target_name in self.target_objects:
+                self.current_target = target_name
+            else:
+                print(f"Warning: target '{target_name}' not found in target_objects")
+
+    def _get_gripper_masks(self, actor_seg_raw):
+        """
+        Extract binary masks for robot grippers from raw segmentation labels.
+        
+        Args:
+            actor_seg_raw: Raw segmentation labels from cameras {camera_name: {actor_segmentation: np.array}}
+        
+        Returns:
+            dict: Gripper masks for each camera {camera_name: binary_mask}
+        """
+        gripper_masks = {}
+        
+        # Get gripper link names from robot
+        gripper_link_names = getattr(self.robot, 'gripper_name', [])
+        
+        # Get all gripper link IDs
+        gripper_ids = []
+        for link_name in gripper_link_names:
+            # Find the link in the robot entities
+            for entity in [self.robot.left_entity, self.robot.right_entity]:
+                link = entity.find_link_by_name(link_name)
+                if link is not None:
+                    gripper_ids.append(link.entity.get_per_scene_id())
+                    break
+        
+        for camera_name, seg_data in actor_seg_raw.items():
+            raw_seg = seg_data["actor_segmentation"]
+            # Create combined mask for all gripper parts
+            gripper_mask = np.zeros_like(raw_seg, dtype=np.uint8)
+            for gid in gripper_ids:
+                gripper_mask = np.logical_or(gripper_mask, raw_seg == gid).astype(np.uint8)
+            gripper_masks[camera_name] = gripper_mask
+        
+        return gripper_masks
 
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
         self._update_render()

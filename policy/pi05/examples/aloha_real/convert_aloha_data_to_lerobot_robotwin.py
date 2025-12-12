@@ -266,6 +266,13 @@ def port_aloha(
         for filename in fnmatch.filter(files, '*.hdf5'):
             file_path = os.path.join(root, filename)
             hdf5_files.append(file_path)
+    
+    # Sort by episode index to ensure consistent ordering with attention_map h5
+    import re
+    def extract_episode_idx(path):
+        match = re.search(r'episode_?(\d+)', os.path.basename(path))
+        return int(match.group(1)) if match else -1
+    hdf5_files = sorted(hdf5_files, key=extract_episode_idx)
 
     dataset = create_empty_dataset(
         repo_id,

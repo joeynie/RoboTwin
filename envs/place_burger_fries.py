@@ -68,12 +68,23 @@ class place_burger_fries(Base_Task):
         self.add_prohibit_area(self.tray, padding=0.1)
         self.add_prohibit_area(self.hamburg, padding=0.05)
         self.add_prohibit_area(self.frenchfries, padding=0.05)
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        # All potential target objects are registered here
+        self.set_target_objects({
+            "hamburg": self.hamburg,        # Object 1 to be grasped first
+            "frenchfries": self.frenchfries,  # Object 2 to be grasped second
+            "tray": self.tray               # Target container for placement
+        })
+        # Initially focus on hamburg (the first object to interact with)
+        self.set_current_target("hamburg")
 
     def play_once(self):
         arm_tag_left = ArmTag("left")
         arm_tag_right = ArmTag("right")
 
-        # Dual grasp of hamburg and french fries
+        # Phase 1: Grasp both objects - focus on both hamburg and frenchfries simultaneously
+        self.set_current_target(["hamburg", "frenchfries"])
         self.move(
             self.grasp_actor(self.hamburg, arm_tag=arm_tag_left, pre_grasp_dis=0.1),
             self.grasp_actor(self.frenchfries, arm_tag=arm_tag_right, pre_grasp_dis=0.1),
@@ -89,7 +100,8 @@ class place_burger_fries(Base_Task):
         tray_place_pose_left = self.tray.get_functional_point(0)
         tray_place_pose_right = self.tray.get_functional_point(1)
 
-        # Place hamburg on tray
+        # Phase 2: Place hamburg on tray - focus on tray (target container)
+        self.set_current_target("tray")
         self.move(
             self.place_actor(self.hamburg,
                              arm_tag=arm_tag_left,
@@ -102,6 +114,7 @@ class place_burger_fries(Base_Task):
         # Move up after placing
         self.move(self.move_by_displacement(arm_tag=arm_tag_left, z=0.08), )
 
+        # Phase 3: Place french fries on tray - focus on tray (target container)
         self.move(
             self.place_actor(self.frenchfries,
                              arm_tag=arm_tag_right,

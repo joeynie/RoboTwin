@@ -32,6 +32,10 @@ class adjust_bottle(Base_Task):
         self.add_prohibit_area(self.bottle, padding=0.15)
         self.left_target_pose = [-0.25, -0.12, 0.95, 0, 1, 0, 0]
         self.right_target_pose = [0.25, -0.12, 0.95, 0, 1, 0, 0]
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        self.set_target_objects({"bottle": self.bottle})
+        self.set_current_target("bottle")
 
     def play_once(self):
         # Determine which arm to use based on qpose_tag (1 for right, else left)

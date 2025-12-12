@@ -41,6 +41,10 @@ class move_playingcard_away(Base_Task):
         self.add_prohibit_area(self.playingcards, padding=0.1)
 
         self.target_pose = self.playingcards.get_pose() # TODO
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        self.set_target_objects({"playingcards": self.playingcards})
+        self.set_current_target("playingcards")
 
     def play_once(self):
         # Determine which arm to use based on playing cards position

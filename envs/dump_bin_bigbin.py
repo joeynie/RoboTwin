@@ -66,6 +66,10 @@ class dump_bin_bigbin(Base_Task):
         self.prohibited_area.append([-0.2, -0.2, 0.2, 0.2])
         # Define target pose for placing
         self.middle_pose = [0, -0.1, 0.741 + self.table_z_bias, 1, 0, 0, 0]
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        self.set_target_objects({"deskbin": self.deskbin})
+        self.set_current_target("deskbin")
         # Define movement actions for shaking the deskbin
         action_lst = [
             Action(
