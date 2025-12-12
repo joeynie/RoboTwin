@@ -44,6 +44,7 @@ bash process_data_pi0.sh "$TASK_NAME" "$MODE" "$N_FRAMES"
 
 # 4. 生成 HuggingFace 数据集缓存
 echo "[4/5] Generating HF dataset..."
+export XDG_CACHE_HOME=$(pwd)/cache
 bash generate.sh processed_data/${TASK_NAME}-${MODE}-${N_FRAMES}/ \
     ${TASK_NAME}-${MODE}-${N_FRAMES}
 

@@ -16,6 +16,19 @@ from scipy.ndimage import distance_transform_edt
 from tqdm import tqdm
 
 
+# Camera name mapping
+CAMERA_RENAME = {
+    "head_camera": "cam_high",
+    "left_camera": "cam_left_wrist",
+    "right_camera": "cam_right_wrist",
+}
+
+
+def rename_camera_name(camera_name: str) -> str:
+    """Rename camera name if it matches the mapping, otherwise return original."""
+    return CAMERA_RENAME.get(camera_name, camera_name)
+
+
 def _resize_with_pad_pil(img: np.ndarray, height: int = 224, width: int = 224) -> np.ndarray:
     """Resize mask to target size with padding to preserve aspect ratio."""
     cur_height, cur_width = img.shape[:2]
@@ -165,13 +178,14 @@ def _process_and_save_masks(
     if isinstance(masks_data, h5py.Group):
         # Dict structure: {camera_name: (num_frames, H, W)}
         for camera_name in masks_data.keys():
+            renamed_camera_name = rename_camera_name(camera_name)
             masks = masks_data[camera_name][:]
             num_frames = masks.shape[0]
             
             for frame_idx in range(num_frames):
                 attn_map = process_mask(masks[frame_idx], patch_size=patch_size, sigma=sigma)
                 
-                dset_name = f"frame_{frame_idx}_{attn_prefix}_{camera_name}"
+                dset_name = f"frame_{frame_idx}_{attn_prefix}_{renamed_camera_name}"
                 if dset_name in group:
                     del group[dset_name]
                 group.create_dataset(dset_name, data=attn_map, compression="gzip")
