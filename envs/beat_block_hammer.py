@@ -52,6 +52,15 @@ class beat_block_hammer(Base_Task):
             block_pose.p[0] + 0.05,
             block_pose.p[1] + 0.05,
         ])
+        
+        # Set target objects for mask extraction (used when actor_segmentation is enabled)
+        # All potential target objects are registered here
+        self.set_target_objects({
+            "hammer": self.hammer,   # The tool to be grasped
+            "block": self.block      # The target to be hit
+        })
+        # Initially focus on hammer (the first object to interact with)
+        self.set_current_target("hammer")
 
     def play_once(self):
         # Get the position of the block's functional point
@@ -59,11 +68,17 @@ class beat_block_hammer(Base_Task):
         # Determine which arm to use based on block position (left if block is on left side, else right)
         arm_tag = ArmTag("left" if block_pose[0] < 0 else "right")
 
+        # Phase 1: Focus on hammer - need to grasp it
+        self.set_current_target("hammer")
+        
         # Grasp the hammer with the selected arm
         self.move(self.grasp_actor(self.hammer, arm_tag=arm_tag, pre_grasp_dis=0.12, grasp_dis=0.01))
         # Move the hammer upwards
         self.move(self.move_by_displacement(arm_tag, z=0.07, move_axis="arm"))
 
+        # Phase 2: Switch focus to block - need to place hammer on it
+        self.set_current_target("block")
+        
         # Place the hammer on the block's functional point (position 1)
         self.move(
             self.place_actor(

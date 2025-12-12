@@ -60,12 +60,28 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
             subgroup = hdf5_group.create_group(key)
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
-            value = np.array(value)
-            if "rgb" in key:
-                encode_data, max_len = images_encoding(value)
-                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+            if len(value) == 0:
+                continue
+            # Check if it's a list of strings
+            if isinstance(value[0], str):
+                # Convert strings to bytes for HDF5 compatibility
+                encoded_value = [s.encode('utf-8') if s is not None else b'' for s in value]
+                max_len = max(len(s) for s in encoded_value) if encoded_value else 1
+                hdf5_group.create_dataset(key, data=encoded_value, dtype=f"S{max_len}")
             else:
-                hdf5_group.create_dataset(key, data=value)
+                value = np.array(value)
+                if "rgb" in key:
+                    encode_data, max_len = images_encoding(value)
+                    hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+                else:
+                    hdf5_group.create_dataset(key, data=value)
+        elif isinstance(value, str):
+            # Single string value
+            encoded_value = value.encode('utf-8')
+            hdf5_group.create_dataset(key, data=encoded_value)
+        elif value is None:
+            # Skip None values
+            continue
         else:
             return
             try:

@@ -10,8 +10,8 @@ import shutil
 from typing import Literal
 
 import h5py
-from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+# from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 # from lerobot.common.datasets.push_dataset_to_hub._download_raw import download_raw
 import numpy as np
 import torch
@@ -20,7 +20,6 @@ import tyro
 import json
 import os
 import fnmatch
-
 
 @dataclasses.dataclass(frozen=True)
 class DatasetConfig:
@@ -112,8 +111,8 @@ def create_empty_dataset(
             ],
         }
 
-    if Path(HF_LEROBOT_HOME / repo_id).exists():
-        shutil.rmtree(HF_LEROBOT_HOME / repo_id)
+    # if Path(HF_LEROBOT_HOME / repo_id).exists():
+    #     shutil.rmtree(HF_LEROBOT_HOME / repo_id)
 
     return LeRobotDataset.create(
         repo_id=repo_id,
@@ -254,8 +253,8 @@ def port_aloha(
     mode: Literal["video", "image"] = "image",
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ):
-    if (HF_LEROBOT_HOME / repo_id).exists():
-        shutil.rmtree(HF_LEROBOT_HOME / repo_id)
+    # if (HF_LEROBOT_HOME / repo_id).exists():
+    #     shutil.rmtree(HF_LEROBOT_HOME / repo_id)
 
     if not raw_dir.exists():
         if raw_repo_id is None:
@@ -266,6 +265,13 @@ def port_aloha(
         for filename in fnmatch.filter(files, '*.hdf5'):
             file_path = os.path.join(root, filename)
             hdf5_files.append(file_path)
+    
+    # Sort by episode index to ensure consistent ordering with attention_map h5
+    import re
+    def extract_episode_idx(path):
+        match = re.search(r'episode_?(\d+)', os.path.basename(path))
+        return int(match.group(1)) if match else -1
+    hdf5_files = sorted(hdf5_files, key=extract_episode_idx)
 
     dataset = create_empty_dataset(
         repo_id,
