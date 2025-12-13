@@ -4,7 +4,7 @@ set -o pipefail
 
 # ========== CONFIG ==========
 ROOT=/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/niexian/RoboTwin
-HF_OUT=/inspire/hdd/project/wuliqifa/public/niexian/huggingface/lerobot
+HF_OUT=/inspire/hdd/project/wuliqifa/public/niexian/
 ATT_OUT=/inspire/hdd/project/wuliqifa/public/niexian/attention_maps
 
 # ========== ARGUMENTS ==========
@@ -44,15 +44,12 @@ bash process_data_pi0.sh "$TASK_NAME" "$MODE" "$N_FRAMES"
 
 # 4. 生成 HuggingFace 数据集缓存
 echo "[4/5] Generating HF dataset..."
-export XDG_CACHE_HOME=$(pwd)/cache
+export XDG_CACHE_HOME=$HF_OUT
 bash generate.sh processed_data/${TASK_NAME}-${MODE}-${N_FRAMES}/ \
     ${TASK_NAME}-${MODE}-${N_FRAMES}
 
 # 5. 拷贝到公共目录
 echo "[5/5] Copying results..."
-cp -r cache/huggingface/lerobot/${TASK_NAME}-${MODE}-${N_FRAMES} \
-    $HF_OUT/
-
 cd ../..
 cp attention_maps/${TASK_NAME}-${MODE}-${N_FRAMES}.h5 \
     $ATT_OUT/
