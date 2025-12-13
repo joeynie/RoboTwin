@@ -77,6 +77,7 @@ class place_can_basket(Base_Task):
     def play_once(self):
         # Phase 1: Grasp the can with the specified arm
         self.set_current_target("can")
+        self.set_subtask_text(f"Grasping can with {self.arm_tag} arm")
         self.move(self.grasp_actor(self.can, arm_tag=self.arm_tag, pre_grasp_dis=0.05))
 
         # Determine the appropriate placement pose based on proximity to functional points of the basket
@@ -94,6 +95,7 @@ class place_can_basket(Base_Task):
 
         # Phase 2: Place the can at the selected position into the basket - focus on basket
         self.set_current_target("basket")
+        self.set_subtask_text(f"Placing can into basket with {self.arm_tag} arm")
         self.move(
             self.place_actor(
                 self.can,
@@ -118,6 +120,7 @@ class place_can_basket(Base_Task):
             # Open the gripper to release the can
             self.move(self.open_gripper(arm_tag=self.arm_tag))
             # Return current arm to origin and grasp basket with opposite arm
+            self.set_subtask_text(f"Grasping basket with {self.arm_tag.opposite} arm")
             self.move(
                 self.back_to_origin(arm_tag=self.arm_tag),
                 self.grasp_actor(self.basket, arm_tag=self.arm_tag.opposite, pre_grasp_dis=0.02),
@@ -128,6 +131,7 @@ class place_can_basket(Base_Task):
             # Move current arm upward to avoid collision
             self.move(self.move_by_displacement(arm_tag=self.arm_tag, z=0.12))
             # Return current arm to origin and grasp basket with opposite arm
+            self.set_subtask_text(f"Grasping basket with {self.arm_tag.opposite} arm")
             self.move(
                 self.back_to_origin(arm_tag=self.arm_tag),
                 self.grasp_actor(self.basket, arm_tag=self.arm_tag.opposite, pre_grasp_dis=0.08),
@@ -136,6 +140,7 @@ class place_can_basket(Base_Task):
         # Close the opposite arm's gripper to firmly grasp the basket
         self.move(self.close_gripper(arm_tag=self.arm_tag.opposite))
         # Lift and slightly pull the basket inward
+        self.set_subtask_text(f"Lifting basket with {self.arm_tag.opposite} arm")
         self.move(
             self.move_by_displacement(arm_tag=self.arm_tag.opposite,
                                       x=-0.02 if self.arm_tag.opposite == "left" else 0.02,

@@ -80,6 +80,20 @@ def create_empty_dataset(
                 motors,
             ],
         },
+        # 为每一帧增加一个离散的 skill_id 标签，用于后续在 pi0 中做 skill-level 辅助训练
+        # 注意：根据当前 lerobot 中 `get_hf_features_from_features` 的约定，
+        # 标量特征需要使用 shape=(1,) 才能被映射为 datasets.Value；shape=() 会被判定为非法。
+        "observation.skill_id": {
+            "dtype": "int64",
+            "shape": (1,),
+        },
+        # 额外保存原始的 skill 文本，方便后续可视化 / 调试。
+        # 文本特征在 lerobot 中使用 dtype="string"，shape=(1,)。
+        "observation.skill_text": {
+            "dtype": "string",
+            "shape": (1,),
+            "names": None,
+        },
     }
 
     if has_velocity:
@@ -174,6 +188,7 @@ def load_raw_episode_data(
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
+        np.ndarray,
 ]:
     with h5py.File(ep_path, "r") as ep:
         state = torch.from_numpy(ep["/observations/qpos"][:])
@@ -195,8 +210,35 @@ def load_raw_episode_data(
                 "cam_right_wrist",
             ],
         )
+        
+        # ======== 读取 subtask_text 作为 skill 文本（长度与 state 对齐） ========
+        num_frames = state.shape[0]
+        if "subtask_text" in ep:
+            raw_subtasks = ep["subtask_text"][()]  # 可能是 bytes 数组或 unicode
+            # HDF5 中通常存为 bytes，需要显式 decode
+            if isinstance(raw_subtasks, np.ndarray) and np.issubdtype(raw_subtasks.dtype, np.bytes_):
+                subtasks_full = np.array([s.decode("utf-8").rstrip("\0") for s in raw_subtasks])
+            else:
+                subtasks_full = raw_subtasks.astype(str)
+            # 对齐到 state 的时间长度
+            if subtasks_full.shape[0] >= num_frames:
+                subtasks = subtasks_full[:num_frames]
+            else:
+                # 极少数异常情况：subtask_text 比 state 短，做安全 pad
+                pad_len = num_frames - subtasks_full.shape[0]
+                subtasks = np.concatenate(
+                    [subtasks_full, np.array([""] * pad_len, dtype=subtasks_full.dtype)]
+                )
+            print(f"[DEBUG convert_lerobot] Loaded subtask_text from {ep_path.name}: "
+                  f"raw_length={len(subtasks_full)}, num_frames={num_frames}, "
+                  f"final_length={len(subtasks)}, unique_count={len(set(subtasks))}, "
+                  f"sample_texts={list(subtasks[:min(3, len(subtasks))])}")
+        else:
+            # 如果没有 subtask_text，就用空串占位，后续仍然会给一个 skill_id（通常是 0）
+            subtasks = np.array([""] * num_frames)
+            print(f"[DEBUG convert_lerobot] No subtask_text found in {ep_path.name}, using empty strings")
 
-    return imgs_per_cam, state, action, velocity, effort
+    return imgs_per_cam, state, action, velocity, effort, subtasks
 
 
 def populate_dataset(
@@ -208,11 +250,19 @@ def populate_dataset(
     if episodes is None:
         episodes = range(len(hdf5_files))
 
+    # 在整个数据集范围内维护一个全局的 skill vocab：skill_text -> skill_id
+    # 这样同一条 skill 文本在不同 episode / frame 中会得到一致的整数 id。
+    skill_vocab: dict[str, int] = {}
+
     for ep_idx in tqdm.tqdm(episodes):
         ep_path = hdf5_files[ep_idx]
 
-        imgs_per_cam, state, action, velocity, effort = load_raw_episode_data(ep_path)
+        imgs_per_cam, state, action, velocity, effort, subtasks = load_raw_episode_data(ep_path)
         num_frames = state.shape[0]
+        
+        # 用于本 episode 的简单统计，方便后续在日志中做 sanity check
+        episode_skill_texts: set[str] = set()
+        
         # add prompt
         dir_path = os.path.dirname(ep_path)
         json_Path = f"{dir_path}/instructions.json"
@@ -221,11 +271,27 @@ def populate_dataset(
             instruction_dict = json.load(f_instr)
             instructions = instruction_dict['instructions']
             instruction = np.random.choice(instructions)
+        
         for i in range(num_frames):
+            # 当前帧的 skill 文本（如果原始数据里没有，则为空串）
+            skill_text = str(subtasks[i]) if subtasks is not None else ""
+            episode_skill_texts.add(skill_text)
+            
+            # 为每一种 skill 文本分配一个稳定的整数 id
+            if skill_text in skill_vocab:
+                skill_id = skill_vocab[skill_text]
+            else:
+                skill_id = len(skill_vocab)
+                skill_vocab[skill_text] = skill_id
+            
             frame = {
                 "observation.state": state[i],
                 "action": action[i],
-                "task": instruction,
+                "task": instruction,  # episode-level 指令
+                # hf_features 中将 shape=(1,) 的离散特征映射为 `datasets.Value`，
+                # 因此这里按照长度为 1 的数组 / 序列进行存储，避免 shape=() 带来的不兼容问题。
+                "observation.skill_id": np.array([skill_id], dtype=np.int64),  # 离散 skill id，供模型做分类等
+                "observation.skill_text": skill_text,  # 原始文本，方便后处理 / 可视化
             }
 
             for camera, img_array in imgs_per_cam.items():
@@ -235,8 +301,33 @@ def populate_dataset(
                 frame["observation.velocity"] = velocity[i]
             if effort is not None:
                 frame["observation.effort"] = effort[i]
+            
+            # Debug: 打印前3帧的 skill 信息，验证是否正确添加到 frame 中
+            if i < 3:
+                print(f"[DEBUG convert_lerobot] Frame {i} in episode {ep_idx}: "
+                      f"skill_id={skill_id}, skill_text={skill_text!r}, "
+                      f"frame_keys={list(frame.keys())}, "
+                      f"has_skill_id={'observation.skill_id' in frame}, "
+                      f"has_skill_text={'observation.skill_text' in frame}")
+            
             dataset.add_frame(frame)
+        
         dataset.save_episode()
+        
+        # ======== 每个 episode 转换完成后的验证信息打印 ========
+        unique_skills = sorted(episode_skill_texts)
+        max_print_skills = 10
+        preview_skills = unique_skills[:max_print_skills]
+        print(
+            f"[MM-ACT -> LeRobot] Converted episode {ep_idx} ({ep_path.name}): "
+            f"frames={num_frames}, "
+            f"unique_skills={len(unique_skills)}, "
+            f"example_skills={preview_skills}, "
+            f"instruction={instruction[:80]!r}"
+            + ("..." if len(instruction) > 80 else "")
+        )
+        print(f"[DEBUG convert_lerobot] Episode {ep_idx} saved. Global skill_vocab size: {len(skill_vocab)}, "
+              f"skill_vocab sample: {dict(list(skill_vocab.items())[:min(5, len(skill_vocab))])}")
 
     return dataset
 

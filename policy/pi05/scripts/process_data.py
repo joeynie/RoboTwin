@@ -26,8 +26,23 @@ def load_hdf5(dataset_path):
         image_dict = dict()
         for cam_name in root[f"/observation/"].keys():
             image_dict[cam_name] = root[f"/observation/{cam_name}/rgb"][()]
+        
+        # 读取 subtask_text（如果存在）
+        subtask_text = None
+        if "/subtask_text" in root:
+            raw_subtasks = root["/subtask_text"][()]
+            # HDF5 中通常存为 bytes，需要显式 decode
+            if isinstance(raw_subtasks, np.ndarray) and np.issubdtype(raw_subtasks.dtype, np.bytes_):
+                subtask_text = np.array([s.decode("utf-8") for s in raw_subtasks])
+            else:
+                subtask_text = raw_subtasks.astype(str)
+            print(f"[DEBUG process_data] Loaded subtask_text from {dataset_path}: shape={subtask_text.shape}, "
+                  f"unique_count={len(set(subtask_text))}, "
+                  f"sample_texts={list(subtask_text[:min(3, len(subtask_text))])}")
+        else:
+            print(f"[DEBUG process_data] No /subtask_text found in {dataset_path}")
 
-    return left_gripper, left_arm, right_gripper, right_arm, image_dict
+    return left_gripper, left_arm, right_gripper, right_arm, image_dict, subtask_text
 
 
 def images_encoding(imgs):
@@ -76,7 +91,7 @@ def data_transform(path, episode_num, save_path):
         ) as f:
             json.dump(save_instructions_json, f, indent=2)
 
-        left_gripper_all, left_arm_all, right_gripper_all, right_arm_all, image_dict = (load_hdf5(
+        left_gripper_all, left_arm_all, right_gripper_all, right_arm_all, image_dict, subtask_text = (load_hdf5(
             os.path.join(path, "data", f"episode{i}.hdf5")))
         qpos = []
         actions = []
@@ -85,6 +100,7 @@ def data_transform(path, episode_num, save_path):
         cam_left_wrist = []
         left_arm_dim = []
         right_arm_dim = []
+        subtasks_processed = []  # 存储处理后的 subtask 文本
 
         last_state = None
         for j in range(0, left_gripper_all.shape[0]):
@@ -117,6 +133,12 @@ def data_transform(path, episode_num, save_path):
                 camera_left_wrist = cv2.imdecode(np.frombuffer(camera_left_wrist_bits, np.uint8), cv2.IMREAD_COLOR)
                 camera_left_wrist_resized = cv2.resize(camera_left_wrist, (640, 480))
                 cam_left_wrist.append(camera_left_wrist_resized)
+                
+                # 处理 subtask_text：对齐到 qpos 的长度（T-1）
+                if subtask_text is not None and j < len(subtask_text):
+                    subtasks_processed.append(str(subtask_text[j]))
+                else:
+                    subtasks_processed.append("")
 
             if j != 0:
                 action = state
@@ -139,6 +161,20 @@ def data_transform(path, episode_num, save_path):
             image.create_dataset("cam_high", data=cam_high_enc, dtype=f"S{len_high}")
             image.create_dataset("cam_right_wrist", data=cam_right_wrist_enc, dtype=f"S{len_right}")
             image.create_dataset("cam_left_wrist", data=cam_left_wrist_enc, dtype=f"S{len_left}")
+            
+            # 保存 subtask_text（如果存在）
+            if subtasks_processed:
+                # 将字符串数组转换为 bytes 数组以便在 HDF5 中存储
+                subtask_bytes = [s.encode("utf-8") for s in subtasks_processed]
+                max_len = max(len(b) for b in subtask_bytes) if subtask_bytes else 1
+                subtask_padded = [b.ljust(max_len, b"\0") for b in subtask_bytes]
+                f.create_dataset("subtask_text", data=np.array(subtask_padded, dtype=f"S{max_len}"))
+                print(f"[DEBUG process_data] Saved subtask_text to {hdf5path}: "
+                      f"length={len(subtasks_processed)}, "
+                      f"unique_count={len(set(subtasks_processed))}, "
+                      f"sample_texts={subtasks_processed[:min(3, len(subtasks_processed))]}")
+            else:
+                print(f"[DEBUG process_data] No subtask_text to save for episode {i}")
 
         begin += 1
         print(f"proccess {i} success!")

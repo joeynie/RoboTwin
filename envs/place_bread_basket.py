@@ -95,6 +95,7 @@ class place_bread_basket(Base_Task):
             arm_tag = ArmTag("right" if self.bread[id].get_pose().p[0] > 0 else "left")
 
             # Grasp the bread
+            self.set_subtask_text(f"Grasp the bread with the {arm_tag} arm.")
             self.move(self.grasp_actor(self.bread[id], arm_tag=arm_tag, pre_grasp_dis=0.07))
             # Move up a little
             self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1, move_axis="arm"))
@@ -102,6 +103,7 @@ class place_bread_basket(Base_Task):
             # Get bread basket's functional point as target pose
             breadbasket_pose = self.breadbasket.get_functional_point(0)
             # Place the bread into the bread basket
+            self.set_subtask_text(f"Place the bread into the basket with the {arm_tag} arm.")
             self.move(
                 self.place_actor(
                     self.bread[id],

@@ -158,6 +158,16 @@ class Base_Task(gym.Env):
 
         self.stage_success_tag = False
 
+        # 当前子任务文本（用于写到 pkl / hdf5 的 subtask_text）
+        self.now_subtask_text = ""
+
+    def set_subtask_text(self, text: str):
+        """
+        设置当前子任务的自然语言描述。
+        在数据采集时，会在每一步的观测里写入到 `subtask_text` 字段。
+        """
+        self.now_subtask_text = text
+
     def check_stable(self):
         actors_list, actors_pose_list = [], []
         for actor in self.scene.get_all_actors():
@@ -442,6 +452,8 @@ class Base_Task(gym.Env):
             "pointcloud": [],
             "joint_action": {},
             "endpose": {},
+            # subtask_text: 当前子任务的自然语言描述
+            "subtask_text": getattr(self, "now_subtask_text", ""),
         }
 
         pkl_dic["observation"] = self.cameras.get_config()
