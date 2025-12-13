@@ -229,14 +229,14 @@ def load_raw_episode_data(
                 subtasks = np.concatenate(
                     [subtasks_full, np.array([""] * pad_len, dtype=subtasks_full.dtype)]
                 )
-            print(f"[DEBUG convert_lerobot] Loaded subtask_text from {ep_path.name}: "
+            print(f"[DEBUG convert_lerobot] Loaded subtask_text from {os.path.basename(ep_path)}: "
                   f"raw_length={len(subtasks_full)}, num_frames={num_frames}, "
                   f"final_length={len(subtasks)}, unique_count={len(set(subtasks))}, "
                   f"sample_texts={list(subtasks[:min(3, len(subtasks))])}")
         else:
             # 如果没有 subtask_text，就用空串占位，后续仍然会给一个 skill_id（通常是 0）
             subtasks = np.array([""] * num_frames)
-            print(f"[DEBUG convert_lerobot] No subtask_text found in {ep_path.name}, using empty strings")
+            print(f"[DEBUG convert_lerobot] No subtask_text found in {os.path.basename(ep_path)}, using empty strings")
 
     return imgs_per_cam, state, action, velocity, effort, subtasks
 
@@ -319,7 +319,7 @@ def populate_dataset(
         max_print_skills = 10
         preview_skills = unique_skills[:max_print_skills]
         print(
-            f"[MM-ACT -> LeRobot] Converted episode {ep_idx} ({ep_path.name}): "
+            f"[MM-ACT -> LeRobot] Converted episode {ep_idx} ({os.path.basename(ep_path)}): "
             f"frames={num_frames}, "
             f"unique_skills={len(unique_skills)}, "
             f"example_skills={preview_skills}, "
