@@ -34,6 +34,8 @@ def load_hdf5(dataset_path):
             # HDF5 中通常存为 bytes，需要显式 decode
             if isinstance(raw_subtasks, np.ndarray) and np.issubdtype(raw_subtasks.dtype, np.bytes_):
                 subtask_text = np.array([s.decode("utf-8") for s in raw_subtasks])
+            elif isinstance(raw_subtasks, np.generic):
+                subtask_text = np.array(pickle.loads(raw_subtasks.tobytes()))
             else:
                 subtask_text = raw_subtasks.astype(str)
             print(f"[DEBUG process_data] Loaded subtask_text from {dataset_path}: shape={subtask_text.shape}, "

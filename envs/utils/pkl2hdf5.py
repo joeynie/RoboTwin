@@ -64,10 +64,9 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
                 continue
             # Check if it's a list of strings
             if isinstance(value[0], str):
-                # Convert strings to bytes for HDF5 compatibility
-                encoded_value = [s.encode('utf-8') if s is not None else b'' for s in value]
-                max_len = max(len(s) for s in encoded_value) if encoded_value else 1
-                hdf5_group.create_dataset(key, data=encoded_value, dtype=f"S{max_len}")
+                # For strings, use pickle serialization
+                serialized = pickle.dumps(value)
+                hdf5_group.create_dataset(key, data=np.bytes_(serialized))
             else:
                 value = np.array(value)
                 if "rgb" in key:
