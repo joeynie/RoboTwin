@@ -34,7 +34,7 @@ class PI0:
         config = _config.get_config(self.train_config_name)
         self.policy = _policy_config.create_trained_policy(
             config,
-            f"policy/pi05/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}",
+            checkpoint_id
             )
         print("loading model success!")
         self.img_size = (224, 224)

@@ -8,9 +8,9 @@ import re
 import pickle
 
 ws_path="/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/niexian/RoboTwin"
-input_path=f"data/click_bell/demo_randomized_mask/data/episode0.hdf5"
-input_path=f"attention_maps/click_bell-demo_randomized_mask-1000.h5"
-# input_path=f"policy/pi05/processed_data/beat_block_hammer-demo_clean_mask-1000/episode_1/episode_1.hdf5"
+# input_path=f"data/adjust_bottle/demo_randomized_mask_10/data/episode0.hdf5"
+input_path=f"/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/niexian/RoboTwin/data/place_burger_fries/demo_randomized_mask/data/episode0.hdf5"
+# input_path=f"policy/pi05/processed_data/dump_bin_bigbin-demo_randomized_mask_3-3/episode_0/episode_0.hdf5"
 os.makedirs("tmp", exist_ok=True)
 
 def save_video(obj, output="tmp/video.mp4"):
@@ -75,13 +75,14 @@ def rename_camera_dataset(group):
 def print_tree(name, obj, indent=0):
     prefix = "  " * indent
     if isinstance(obj, h5py.Group):
-        print(f"{prefix}📁 {name}/")
+        num_items = len(obj.keys())
+        print(f"{prefix}📁 {name}/  ({num_items} items)")
         for key in obj:
             print_tree(key, obj[key], indent + 1)
     else:  # Dataset
         print(f"{prefix}📄 {name}  shape={obj.shape}, dtype={obj.dtype}")
-        if name.endswith("camera"):
-            save_video(obj, f"tmp/{name}.mp4")
+        # if name.endswith("camera"):
+        #     save_video(obj, f"tmp/{name}.mp4")
 
 def show_h5_tree(path):
     with h5py.File(path, "r") as f:
@@ -180,11 +181,11 @@ def fix_pickled_joint_action(h5_path, group_path="joint_action"):
 
 if __name__ == "__main__":
     # with h5py.File(input_path, "r") as f:
-    #     episode = f["episode_1"]
+    #     episode = f["episode_0"]
     #     collect_frames_and_save_video(
     #         episode,
     #         camera_suffix="cam_high",
-    #         output="tmp/episode_1_cam_high.mp4"
+    #         output="tmp/episode_0_cam_high.mp4"
     #     )
 
     show_h5_tree(input_path)
@@ -192,4 +193,5 @@ if __name__ == "__main__":
     show_h5_tree(input_path)
     # with h5py.File(input_path, "r+") as f:
     #     rename_camera_dataset(f)
+    show_h5_tree(input_path)
     
