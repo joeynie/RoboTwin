@@ -9,5 +9,7 @@ instruction_type: unseen
 # Add Parameters You Need
 train_config_name: pi0_base_aloha_robotwin_full
 model_name: robotwin_beat_block_hammer_2head
-checkpoint_id: /inspire/hdd/project/wuliqifa/public/yangbowen/checkpoints/pi0_base_aloha_robotwin_full/click-bell-nx/10000
+checkpoint_id: /inspire/ssd/project/wuliqifa/zhousizhuo-240107010006/niexian/Representation-Matters/checkpoints/pi0_base_aloha_robotwin_full/robotwin_click_bell_zeroconv/30000
 pi0_step: 50
+extract_attention: True
+attention_layer_idx: 10

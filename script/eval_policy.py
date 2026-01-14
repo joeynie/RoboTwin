@@ -130,6 +130,7 @@ def main(usr_args):
         video_size = str(camera_config["w"]) + "x" + str(camera_config["h"])
         video_save_dir.mkdir(parents=True, exist_ok=True)
         args["eval_video_save_dir"] = video_save_dir
+        usr_args["attn_save_dir"] = str(save_dir)
 
     # output camera config
     print("============= Config =============\n")
@@ -290,12 +291,24 @@ def eval_policy(task_name,
 
         succ = False
         reset_func(model)
+        # Generate test point ID once per episode for attention map recording
+        test_point_id = f"test{TASK_ENV.test_num}"
+        
+        # Start attention map recording at episode beginning
+        if hasattr(model, 'start_test_point'):
+            model.start_test_point(test_point_id)
+        
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
             if TASK_ENV.eval_success:
                 succ = True
                 break
+        
+        # End attention map recording at episode end
+        if hasattr(model, 'end_test_point'):
+            model.end_test_point()
+        
         # task_total_reward += TASK_ENV.episode_score
         if TASK_ENV.eval_video_path is not None:
             TASK_ENV._del_eval_video_ffmpeg()
