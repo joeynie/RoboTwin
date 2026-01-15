@@ -35,8 +35,7 @@ def get_model(usr_args):
         checkpoint_id: Checkpoint identifier
         pi0_step: Number of action steps
         extract_attention: Enable attention extraction (default: False)
-        target_layer_name: Layer name for attention (default: "layers.10.self_attn")
-                          Examples: "layers.10.self_attn", "gemma_expert.model.layers.10"
+        layer_idx: Layer index for attention visualization (0-indexed, None means last layer)
         attn_save_dir: Output directory for attention maps (default: "eval_result")
     """
     train_config_name = usr_args["train_config_name"]
@@ -46,7 +45,7 @@ def get_model(usr_args):
     
     # Attention visualization parameters (optional)
     extract_attention = usr_args.get("extract_attention", False)
-    target_layer_name = usr_args.get("target_layer_name", "layers.10.self_attn")
+    layer_idx = usr_args.get("layer_idx", None)
     attn_save_dir = usr_args.get("attn_save_dir", "eval_result")
     
     return PI0(
@@ -55,19 +54,18 @@ def get_model(usr_args):
         checkpoint_id=checkpoint_id,
         pi0_step=pi0_step,
         extract_attention=extract_attention,
-        target_layer_name=target_layer_name,
+        layer_idx=layer_idx,
         attn_save_dir=attn_save_dir
     )
 
 
-def eval(TASK_ENV, model, observation, test_point_id=None):
+def eval(TASK_ENV, model, observation):
     """Run evaluation loop with optional attention map recording.
     
     Args:
         TASK_ENV: Environment interface
         model: PI0 model instance
         observation: Initial observation
-        test_point_id: Deprecated, ignored. Use eval_policy.py to control start/end.
     """
     if model.observation_window is None:
         instruction = TASK_ENV.get_instruction()
@@ -79,25 +77,12 @@ def eval(TASK_ENV, model, observation, test_point_id=None):
     # ======== Get Action ========
 
     actions = model.get_action()[:model.pi0_step]
-    
-    # Get the attention maps from the latest inference
-    current_attention_maps = getattr(model, '_current_attention_maps', {})
-    
-    # Record initial frame with per-view attention
-    if hasattr(model, 'attn_recorder') and model.attn_recorder is not None and hasattr(model, 'frame_images') and model.frame_images:
-        model.attn_recorder.process_frame(model.frame_images, current_attention_maps)
-
-    # Execute actions and record frames with the same attention maps
-    # (since we don't re-infer, we reuse the attention from this batch of actions)
+    # Execute actions
     for action in actions:
         TASK_ENV.take_action(action)
         observation = TASK_ENV.get_obs()
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
-        
-        # Record frame with the same attention maps
-        if hasattr(model, 'attn_recorder') and model.attn_recorder is not None and hasattr(model, 'frame_images') and model.frame_images:
-            model.attn_recorder.process_frame(model.frame_images, current_attention_maps)
 
     # ============================
 
