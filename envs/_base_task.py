@@ -570,6 +570,10 @@ class Base_Task(gym.Env):
                     # Create binary mask where target object pixels are 1
                     binary_mask = (raw_seg == obj_id).astype(np.uint8)
                     target_masks[camera_name][obj_name] = binary_mask
+                else:
+                    if obj_actor.obj_name == "pot":
+                        binary_mask = np.isin(raw_seg, [69, 70]).astype(np.uint8)
+                        target_masks[camera_name][obj_name] = binary_mask
         
         return target_masks
 
