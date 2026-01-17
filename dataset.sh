@@ -3,7 +3,7 @@ set -e
 set -o pipefail
 
 # ========== CONFIG ==========
-ROOT=/inspire/hdd/project/wuliqifa/chenxinyan-240108120066/niexian/RoboTwin
+ROOT=/inspire/ssd/project/wuliqifa/zhousizhuo-240107010006/niexian/RoboTwin
 HF_OUT=/inspire/hdd/project/wuliqifa/public/niexian/
 ATT_OUT=/inspire/hdd/project/wuliqifa/public/niexian/attention_maps
 

@@ -112,8 +112,8 @@ class InferenceAttentionHook:
                             # Apply softmax to get attention probabilities
                             attn_probs = F.softmax(attn_scores, dim=-1, dtype=torch.float32)
                         
-                        if attn_probs is not None:
-                            attention_weights[layer_idx] = attn_probs.detach().cpu()
+                    if attn_probs is not None:
+                        attention_weights[layer_idx] = attn_probs.detach().cpu()
                 
                 if attention_weights:
                     self.attention_weights = attention_weights

@@ -1,5 +1,5 @@
 #!/bin/bash
-
+unset LD_LIBRARY_PATH 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.4 # ensure GPU < 24G
 
 policy_name=pi05
@@ -17,7 +17,8 @@ source .venv/bin/activate
 cd ../.. # move to root
 
 PYTHONWARNINGS=ignore::UserWarning \
-uv run python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
+# python  -m debugpy --listen  5678 --wait-for-client  script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
+python  script/eval_policy.py  --config policy/$policy_name/deploy_policy.yml \
     --overrides \
     --task_name ${task_name} \
     --task_config ${task_config} \
