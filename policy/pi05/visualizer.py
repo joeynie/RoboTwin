@@ -65,6 +65,15 @@ class _VideoWriter:
             self.writer.release()
 
 
+class _QKCaptureHook:
+    def __init__(self):
+        self.qk_states = None
+
+    def __call__(self, module, input, output):
+        if isinstance(output, tuple) and len(output) >= 3:
+            self.qk_states = output[2]
+
+
 class _SkillPlotter:
     def __init__(self, skill_names: Optional[list[str]] = None, index_offset: int = 1):
         import matplotlib
@@ -141,6 +150,7 @@ class InferenceTripleVisualizer:
         fps: int = 10,
         alpha: float = 0.35,
         layer_idx: Optional[int] = None,
+        use_origin_branch: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -149,6 +159,7 @@ class InferenceTripleVisualizer:
         self.fps = fps
         self.alpha = alpha
         self.layer_idx = layer_idx
+        self.use_origin_branch = use_origin_branch
 
         self.calls = 0
         self.writer: Optional[_VideoWriter] = None
@@ -156,6 +167,9 @@ class InferenceTripleVisualizer:
         self.model = None
         self.skill_plotter = _SkillPlotter()
         self.test_point_id: Optional[str] = None
+        self._qk_hook: Optional[_QKCaptureHook] = None
+        self._hook_handles: list[Any] = []
+        self._latest_depth_kv = None
 
         self.num_images = 3
         self.num_patches_per_image = 256
@@ -170,6 +184,7 @@ class InferenceTripleVisualizer:
             self.model.attention_viz_layer_idx = self.layer_idx
 
         self._wrap_depth_cache(self.model)
+        self._attach_hooks(self.model)
         policy._return_skill_logits = True
 
         original_infer = policy.infer
@@ -213,6 +228,30 @@ class InferenceTripleVisualizer:
         model._apply_depth_ablation = wrapped
         model._depth_kv_wrapped = True
 
+    def _find_attention_target(self, model: Any):
+        if hasattr(model, 'paligemma_with_expert'):
+            return model.paligemma_with_expert
+        if hasattr(model, 'model') and hasattr(model.model, 'paligemma_with_expert'):
+            return model.model.paligemma_with_expert
+        for module in model.modules():
+            if hasattr(module, 'paligemma_with_expert'):
+                return module.paligemma_with_expert
+        return None
+
+    def _capture_depth_kwargs(self, module, args, kwargs):
+        if 'depth_kv' in kwargs:
+            self._latest_depth_kv = kwargs['depth_kv']
+
+    def _attach_hooks(self, model: Any) -> None:
+        target = self._find_attention_target(model)
+        if target is None:
+            return
+        self._qk_hook = _QKCaptureHook()
+        self._hook_handles.append(target.register_forward_hook(self._qk_hook))
+        self._hook_handles.append(
+            target.register_forward_pre_hook(self._capture_depth_kwargs, with_kwargs=True)
+        )
+
     def _to_uint8_hwc(self, image: Any) -> np.ndarray:
         if isinstance(image, torch.Tensor):
             img = image.detach().cpu().numpy()
@@ -248,6 +287,37 @@ class InferenceTripleVisualizer:
             base = np.zeros((*self.image_size, 3), dtype=np.uint8)
         return self._to_uint8_hwc(base)
 
+    def _get_qk_states(self):
+        if self.model is None:
+            return None
+        if hasattr(self.model, 'last_qk_states') and self.model.last_qk_states is not None:
+            return self.model.last_qk_states
+        if self._qk_hook is not None:
+            return self._qk_hook.qk_states
+        return None
+
+    def _get_depth_kv(self):
+        if self.model is None:
+            return None
+        if hasattr(self.model, 'last_depth_kv') and self.model.last_depth_kv is not None:
+            return self.model.last_depth_kv
+        return self._latest_depth_kv
+
+    def _extract_depth_tensor(self, depth_kv: Any) -> Any:
+        if depth_kv is None:
+            return None
+        if isinstance(depth_kv, list) and depth_kv:
+            depth_kv = depth_kv[0]
+        if isinstance(depth_kv, dict):
+            if 'depth_token_k' in depth_kv:
+                return depth_kv['depth_token_k']
+            if 'depth_token_v' in depth_kv:
+                return depth_kv['depth_token_v']
+            for value in depth_kv.values():
+                return value
+            return None
+        return depth_kv
+
     def _collect_attention(self, qk_states: Any) -> Dict[int, torch.Tensor]:
         if isinstance(qk_states, dict):
             return qk_states
@@ -257,7 +327,12 @@ class InferenceTripleVisualizer:
         for layer_idx, qk_dict in qk_states:
             if not isinstance(qk_dict, dict):
                 continue
-            attn_probs = qk_dict.get("attention_probs")
+            attn_probs = None
+            # 根据 use_origin_branch 选择使用哪个分支的 attention_probs
+            if self.use_origin_branch:
+                attn_probs = qk_dict.get("attention_probs_origin")
+            if attn_probs is None:
+                attn_probs = qk_dict.get("attention_probs")
             if attn_probs is None and "attention" in qk_dict:
                 q, k = qk_dict["attention"]
                 head_dim = q.shape[-1]
@@ -306,6 +381,7 @@ class InferenceTripleVisualizer:
         return cv2.addWeighted(image, 1.0 - self.alpha, heat, self.alpha, 0)
 
     def _depth_views(self, depth_kv: Any, base_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        depth_kv = self._extract_depth_tensor(depth_kv)
         if depth_kv is None:
             blank = np.zeros_like(base_image)
             return blank, blank
@@ -368,13 +444,13 @@ class InferenceTripleVisualizer:
             return
 
         base = self._get_base_image(obs)
-        qk_states = getattr(self.model, "last_qk_states", None)
+        qk_states = self._get_qk_states()
         attn_map = self._attention_map(qk_states)
         if attn_map is None:
             return
 
         attn_overlay = self._overlay(base, attn_map, cv2.COLORMAP_JET)
-        depth_base, depth_heat = self._depth_views(getattr(self.model, "last_depth_kv", None), base)
+        depth_base, depth_heat = self._depth_views(self._get_depth_kv(), base)
 
         num_classes = int(getattr(self.model, "skill_num_classes", 3))
         if "skill_logits" in result:
