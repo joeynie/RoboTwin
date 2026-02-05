@@ -73,14 +73,13 @@ class InferenceAttentionHook:
     def __init__(self):
         self.attention_weights = {}
         self.enabled = True
-        self.call_count = 0
+        # use_origin_branch: If True, prefer origin branch attention when available
+        self.use_origin_branch = False
 
     def __call__(self, module, input, output):
         """Hook function called during forward pass."""
         if not self.enabled:
             return
-
-        self.call_count += 1
 
         # The output structure for PaliGemmaWithExpertModel:
         # ([prefix_output, suffix_output], past_key_values, all_qk_states)
@@ -93,11 +92,20 @@ class InferenceAttentionHook:
                     if not isinstance(qk_dict, dict): continue
                     
                     attn_probs = None
-                    # Try to get pre-computed attention_probs first
-                    if 'attention_probs' in qk_dict and qk_dict['attention_probs'] is not None:
+                    
+                    # 根据 use_origin_branch 选择使用哪个分支的 attention_probs
+                    # use_origin_branch=True: 用 origin (训练时 object_use_control=False)
+                    # use_origin_branch=False: 用 control branch (默认)
+                    if self.use_origin_branch:
+                        # 优先使用 attention_probs_origin
+                        if 'attention_probs_origin' in qk_dict and qk_dict['attention_probs_origin'] is not None:
+                            attn_probs = qk_dict['attention_probs_origin']
+                    
+                    # Fallback 或 use_origin_branch=False: 使用默认的 attention_probs
+                    if attn_probs is None and 'attention_probs' in qk_dict and qk_dict['attention_probs'] is not None:
                         attn_probs = qk_dict['attention_probs']
-                    # If not available (e.g., when using depth attention), compute from Q/K
-                    elif 'attention' in qk_dict:
+                    # 再 fallback: 从 attention Q/K 计算
+                    if attn_probs is None and 'attention' in qk_dict:
                         q, k = qk_dict['attention']
                         if q is not None and k is not None:
                             # Compute attention: softmax(Q @ K^T / sqrt(d))
@@ -142,6 +150,7 @@ class InferenceAttentionVisualizer:
         alpha: float = 0.5,
         layer_idx: Optional[int] = None,
         create_videos: bool = True,
+        use_origin_branch: bool = False,
     ):
         """
         Initialize the inference attention visualizer.
@@ -153,6 +162,9 @@ class InferenceAttentionVisualizer:
             alpha: Transparency factor for attention overlays
             layer_idx: Specific layer index to visualize (0-indexed)
             create_videos: Whether to create videos from samples
+            use_origin_branch: If True, visualize origin branch attention (for models
+                              trained with object_use_control=False). Default False
+                              uses control branch attention.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -162,9 +174,11 @@ class InferenceAttentionVisualizer:
         self.alpha = alpha
         self.layer_idx = layer_idx
         self.create_videos = create_videos
+        self.use_origin_branch = use_origin_branch
 
         # Hook for attention extraction
         self.attention_hook = InferenceAttentionHook()
+        self.attention_hook.use_origin_branch = use_origin_branch
         self.hook_handles = []
 
         # Statistics
@@ -180,6 +194,16 @@ class InferenceAttentionVisualizer:
         # Model configuration
         self.num_images = 3  # base, secondary, wrist
         self.num_patches_per_image = 256  # 16x16 patches
+
+        # Attention head visualization configuration
+        # head_indices: List of head indices to visualize (e.g., [0, 1])
+        #   - None: use all heads
+        self.head_indices = [0, 1]
+
+        # head_visualization_mode: How to combine/display multiple heads
+        #   - "average": Average attention across selected heads (single map per view)
+        #   - "concat": Show each head separately (one row per head)
+        self.head_visualization_mode = "average"  # "average" or "concat"
 
     def wrap_model(self, model: nn.Module) -> nn.Module:
         """Wrap the model to automatically capture attention during inference."""
@@ -259,14 +283,18 @@ class InferenceAttentionVisualizer:
                 self.tmp_video_count += 1
 
     def _convert_image_format(self, image: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
-        """Convert image to display format and resize with padding to square."""
+        """Convert image to display format and resize with padding to square.
+
+        Handles torch tensors, channel-first images, ranges [-1,1]/[0,1]/[0,255],
+        and converts to uint8 HxW x3.
+        """
         if isinstance(image, torch.Tensor):
             img_np = image.detach().cpu().numpy()
         else:
             img_np = np.array(image)
 
-        # Remove batch dimension if present
-        if img_np.ndim == 4 and img_np.shape[0] == 1:
+        # Remove batch dimension if present (take first sample)
+        if img_np.ndim == 4:
             img_np = img_np[0]
 
         # Convert from channel-first to channel-last
@@ -275,14 +303,16 @@ class InferenceAttentionVisualizer:
 
         # Convert to uint8
         if img_np.dtype != np.uint8:
-            if img_np.max() <= 1.0:  # If normalized [0,1]
+            # Check if image is in [-1, 1] range (model input format)
+            if img_np.min() < 0:
+                # [-1, 1] -> [0, 255]
+                img_np = ((img_np + 1.0) / 2.0 * 255.0).astype(np.uint8)
+            elif img_np.max() <= 1.0:
+                # [0, 1] -> [0, 255]
                 img_np = (img_np * 255).astype(np.uint8)
             else:
+                # Already in [0, 255] range
                 img_np = np.clip(img_np, 0, 255).astype(np.uint8)
-
-        # Convert BGR to RGB for display (OpenCV uses BGR by default)
-        if img_np.shape[-1] == 3: 
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
 
         # Resize with padding to target size (handles non-square images from RobotWin)
         target_h, target_w = self.image_size
@@ -331,22 +361,66 @@ class InferenceAttentionVisualizer:
             last_action_idx = action_tokens_end - 1
             action_to_image_attn = layer_attention[:, last_action_idx, image_tokens_start:image_tokens_end]  # [num_heads, num_image_patches]
 
-            # Average over heads
-            attention_map = action_to_image_attn.mean(dim=0)  # [num_image_patches]
+            # Select specified heads if configured
+            if self.head_indices is not None:
+                # Ensure head indices are valid
+                max_heads = action_to_image_attn.shape[0]
+                valid_head_indices = [idx for idx in self.head_indices if 0 <= idx < max_heads]
+                if valid_head_indices:
+                    selected_heads_attn = action_to_image_attn[valid_head_indices]  # [selected_num_heads, num_image_patches]
+                else:
+                    selected_heads_attn = action_to_image_attn  # Fallback to all heads
+            else:
+                selected_heads_attn = action_to_image_attn
 
-            # Reshape to image grid format
-            if attention_map.numel() == self.num_images * self.num_patches_per_image:
-                attention_map = attention_map.view(self.num_images, self.num_patches_per_image)
-
-                # Split into individual views
-                view_names = ["base_0", "left_wrist_0", "right_wrist_0"]
-                for i, view_name in enumerate(view_names):
-                    if i < attention_map.shape[0]:
-                        view_attention = attention_map[i].cpu().numpy()  # [256]
-                        view_attention = view_attention.reshape(16, 16)  # [16, 16]
-                        processed_attention[f"layer_{layer_idx}_{view_name}"] = view_attention
+            # Process attention based on visualization mode
+            if self.head_visualization_mode == "concat":
+                # Concat mode: visualize each selected head separately
+                self._process_concat_attention(processed_attention, selected_heads_attn, layer_idx)
+            else:
+                # Average mode: average over selected heads
+                attention_map = selected_heads_attn.mean(dim=0)  # [num_image_patches]
+                self._process_average_attention(processed_attention, attention_map, layer_idx)
 
         return processed_attention
+
+    def _process_average_attention(self, processed_attention: Dict[str, np.ndarray], 
+                                 attention_map: torch.Tensor, layer_idx: int):
+        """Process attention map for average mode."""
+        # Reshape to image grid format
+        if attention_map.numel() == self.num_images * self.num_patches_per_image:
+            attention_map = attention_map.view(self.num_images, self.num_patches_per_image)
+
+            # Split into individual views
+            view_names = ["base_0", "left_wrist_0", "right_wrist_0"]
+            for i, view_name in enumerate(view_names):
+                if i < attention_map.shape[0]:
+                    view_attention = attention_map[i].cpu().numpy()  # [256]
+                    view_attention = view_attention.reshape(16, 16)  # [16, 16]
+                    processed_attention[f"layer_{layer_idx}_{view_name}"] = view_attention
+
+    def _process_concat_attention(self, processed_attention: Dict[str, np.ndarray], 
+                                selected_heads_attn: torch.Tensor, layer_idx: int):
+        """Process attention maps for concat mode."""
+        num_selected_heads = selected_heads_attn.shape[0]
+        
+        # Process each head separately
+        for head_idx in range(num_selected_heads):
+            head_attention = selected_heads_attn[head_idx]  # [num_image_patches]
+            
+            # Reshape to image grid format
+            if head_attention.numel() == self.num_images * self.num_patches_per_image:
+                head_attention = head_attention.view(self.num_images, self.num_patches_per_image)
+
+                # Split into individual views for this head
+                view_names = ["base_0", "left_wrist_0", "right_wrist_0"]
+                for i, view_name in enumerate(view_names):
+                    if i < head_attention.shape[0]:
+                        view_attention = head_attention[i].cpu().numpy()  # [256]
+                        view_attention = view_attention.reshape(16, 16)  # [16, 16]
+                        # Add head index to distinguish different heads
+                        head_key = f"layer_{layer_idx}_head_{head_idx}_{view_name}"
+                        processed_attention[head_key] = view_attention
 
     def _create_visualization_frame(
         self,
@@ -386,75 +460,16 @@ class InferenceAttentionVisualizer:
         if right_wrist_image is None:
             right_wrist_image = np.zeros((*self.image_size, 3), dtype=np.uint8)
 
-        # Create visualization layout: 2x3 grid
+        # Create visualization layout
         # Top row: Original images (base, left_wrist, right_wrist)
-        # Bottom row: Attention overlays
+        # Bottom row: Attention overlays (depends on mode)
         height, width = base_image.shape[:2]
-        
+
         if processed_attention:
-            combined_frame = np.zeros((height * 2, width * 3, 3), dtype=np.uint8)
-
-            # Top row: Original images
-            combined_frame[0:height, 0:width] = base_image
-            combined_frame[0:height, width:width*2] = left_wrist_image
-            combined_frame[0:height, width*2:width*3] = right_wrist_image
-
-            # Bottom row: Attention overlays
-            # Base camera
-            base_attn_key = None
-            for key in processed_attention.keys():
-                if "base_0" in key:
-                    base_attn_key = key
-                    break
-
-            if base_attn_key:
-                base_overlay = self._create_attention_overlay(base_image, processed_attention[base_attn_key])
-                combined_frame[height:height*2, 0:width] = base_overlay
+            if self.head_visualization_mode == "concat":
+                combined_frame = self._create_concat_layout(base_image, left_wrist_image, right_wrist_image, processed_attention, height, width)
             else:
-                combined_frame[height:height*2, 0:width] = base_image
-
-            # Left wrist camera
-            left_wrist_attn_key = None
-            for key in processed_attention.keys():
-                if "left_wrist_0" in key:
-                    left_wrist_attn_key = key
-                    break
-
-            if left_wrist_attn_key:
-                left_wrist_overlay = self._create_attention_overlay(left_wrist_image, processed_attention[left_wrist_attn_key])
-                combined_frame[height:height*2, width:width*2] = left_wrist_overlay
-            else:
-                combined_frame[height:height*2, width:width*2] = left_wrist_image
-
-            # Right wrist camera
-            right_wrist_attn_key = None
-            for key in processed_attention.keys():
-                if "right_wrist_0" in key:
-                    right_wrist_attn_key = key
-                    break
-
-            if right_wrist_attn_key:
-                right_wrist_overlay = self._create_attention_overlay(right_wrist_image, processed_attention[right_wrist_attn_key])
-                combined_frame[height:height*2, width*2:width*3] = right_wrist_overlay
-            else:
-                combined_frame[height:height*2, width*2:width*3] = right_wrist_image
-
-            # Add text labels for clarity
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.5
-            thickness = 1
-            color = (255, 255, 255)
-            
-            # Labels for top row
-            cv2.putText(combined_frame, "Base View", (10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
-            cv2.putText(combined_frame, "Left Wrist", (width + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
-            cv2.putText(combined_frame, "Right Wrist", (width*2 + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
-            
-            # Labels for bottom row
-            cv2.putText(combined_frame, "Attention", (10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
-            cv2.putText(combined_frame, "Attention", (width + 10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
-            cv2.putText(combined_frame, "Attention", (width*2 + 10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
-
+                combined_frame = self._create_average_layout(base_image, left_wrist_image, right_wrist_image, processed_attention, height, width)
         else:
             # Simple horizontal layout without attention
             combined_frame = np.zeros((height, width * 3, 3), dtype=np.uint8)
@@ -464,15 +479,180 @@ class InferenceAttentionVisualizer:
 
         return combined_frame
 
-    def _create_attention_overlay(self, image: np.ndarray, attention_map: np.ndarray) -> np.ndarray:
+    def _create_average_layout(self, base_image: np.ndarray, left_wrist_image: np.ndarray, right_wrist_image: np.ndarray,
+                              processed_attention: Dict[str, np.ndarray], height: int, width: int) -> np.ndarray:
+        """Create 2x3 layout for average mode."""
+        combined_frame = np.zeros((height * 2, width * 3, 3), dtype=np.uint8)
+
+        # Top row: Original images
+        combined_frame[0:height, 0:width] = base_image
+        combined_frame[0:height, width:width*2] = left_wrist_image
+        combined_frame[0:height, width*2:width*3] = right_wrist_image
+
+        # Bottom row: Attention overlays
+        # Find attention keys and collect maps for global normalization
+        base_attn_key = None
+        left_wrist_attn_key = None
+        right_wrist_attn_key = None
+        attention_maps = []
+        
+        for key in processed_attention.keys():
+            if "base_0" in key:
+                base_attn_key = key
+                attention_maps.append(processed_attention[key])
+            elif "left_wrist_0" in key:
+                left_wrist_attn_key = key
+                attention_maps.append(processed_attention[key])
+            elif "right_wrist_0" in key:
+                right_wrist_attn_key = key
+                attention_maps.append(processed_attention[key])
+
+        # Compute global min/max for consistent normalization
+        vmin, vmax = None, None
+        if attention_maps:
+            all_values = np.concatenate([am.flatten() for am in attention_maps])
+            vmin = all_values.min()
+            vmax = all_values.max()
+
+        # Create overlays with global normalization
+        if base_attn_key:
+            base_overlay = self._create_attention_overlay(base_image, processed_attention[base_attn_key], vmin=vmin, vmax=vmax)
+            combined_frame[height:height*2, 0:width] = base_overlay
+        else:
+            combined_frame[height:height*2, 0:width] = base_image
+
+        if left_wrist_attn_key:
+            left_wrist_overlay = self._create_attention_overlay(left_wrist_image, processed_attention[left_wrist_attn_key], vmin=vmin, vmax=vmax)
+            combined_frame[height:height*2, width:width*2] = left_wrist_overlay
+        else:
+            combined_frame[height:height*2, width:width*2] = left_wrist_image
+
+        if right_wrist_attn_key:
+            right_wrist_overlay = self._create_attention_overlay(right_wrist_image, processed_attention[right_wrist_attn_key], vmin=vmin, vmax=vmax)
+            combined_frame[height:height*2, width*2:width*3] = right_wrist_overlay
+        else:
+            combined_frame[height:height*2, width*2:width*3] = right_wrist_image
+
+        # Add text labels for clarity
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        color = (255, 255, 255)
+        
+        # Labels for top row
+        cv2.putText(combined_frame, "Base View", (10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        cv2.putText(combined_frame, "Left Wrist", (width + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        cv2.putText(combined_frame, "Right Wrist", (width*2 + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        
+        # Labels for bottom row
+        # cv2.putText(combined_frame, "Attention", (10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        # cv2.putText(combined_frame, "Attention", (width + 10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        # cv2.putText(combined_frame, "Attention", (width*2 + 10, height + 20), font, font_scale, color, thickness, cv2.LINE_AA)
+
+        return combined_frame
+
+    def _create_concat_layout(self, base_image: np.ndarray, left_wrist_image: np.ndarray, right_wrist_image: np.ndarray,
+                             processed_attention: Dict[str, np.ndarray], height: int, width: int) -> np.ndarray:
+        """Create layout for concat mode showing multiple attention heads."""
+        # Count unique heads in processed attention
+        heads = set()
+        for key in processed_attention.keys():
+            if "_head_" in key:
+                head_part = key.split("_head_")[1].split("_")[0]
+                heads.add(int(head_part))
+        
+        num_heads = len(heads)
+        if num_heads == 0:
+            # Fallback to average layout
+            return self._create_average_layout(base_image, left_wrist_image, right_wrist_image, processed_attention, height, width)
+        
+        # Create layout: top row original images, then one row per head
+        total_rows = 1 + num_heads  # 1 original + N heads
+        combined_frame = np.zeros((height * total_rows, width * 3, 3), dtype=np.uint8)
+
+        # Top row: Original images
+        combined_frame[0:height, 0:width] = base_image
+        combined_frame[0:height, width:width*2] = left_wrist_image
+        combined_frame[0:height, width*2:width*3] = right_wrist_image
+        
+        # Collect all attention maps for global normalization
+        all_attention_maps = list(processed_attention.values())
+        vmin, vmax = None, None
+        if all_attention_maps:
+            all_values = np.concatenate([am.flatten() for am in all_attention_maps])
+            vmin = all_values.min()
+            vmax = all_values.max()
+
+        # Process each head
+        sorted_heads = sorted(heads)
+        for row_idx, head_idx in enumerate(sorted_heads):
+            row_offset = (row_idx + 1) * height
+            
+            # Find attention maps for this head
+            base_key = None
+            left_wrist_key = None
+            right_wrist_key = None
+            for key in processed_attention.keys():
+                if f"_head_{head_idx}_" in key:
+                    if "base_0" in key:
+                        base_key = key
+                    elif "left_wrist_0" in key:
+                        left_wrist_key = key
+                    elif "right_wrist_0" in key:
+                        right_wrist_key = key
+            
+            # Create overlays for this head
+            if base_key:
+                base_overlay = self._create_attention_overlay(base_image, processed_attention[base_key], vmin=vmin, vmax=vmax)
+                combined_frame[row_offset:row_offset+height, 0:width] = base_overlay
+            else:
+                combined_frame[row_offset:row_offset+height, 0:width] = base_image
+
+            if left_wrist_key:
+                left_wrist_overlay = self._create_attention_overlay(left_wrist_image, processed_attention[left_wrist_key], vmin=vmin, vmax=vmax)
+                combined_frame[row_offset:row_offset+height, width:width*2] = left_wrist_overlay
+            else:
+                combined_frame[row_offset:row_offset+height, width:width*2] = left_wrist_image
+
+            if right_wrist_key:
+                right_wrist_overlay = self._create_attention_overlay(right_wrist_image, processed_attention[right_wrist_key], vmin=vmin, vmax=vmax)
+                combined_frame[row_offset:row_offset+height, width*2:width*3] = right_wrist_overlay
+            else:
+                combined_frame[row_offset:row_offset+height, width*2:width*3] = right_wrist_image
+
+        # Add text labels
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.4
+        thickness = 1
+        color = (255, 255, 255)
+        
+        # Labels for top row
+        cv2.putText(combined_frame, "Base View", (10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        cv2.putText(combined_frame, "Left Wrist", (width + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        cv2.putText(combined_frame, "Right Wrist", (width*2 + 10, 20), font, font_scale, color, thickness, cv2.LINE_AA)
+        
+        # Labels for attention rows
+        for row_idx, head_idx in enumerate(sorted_heads):
+            y_pos = (row_idx + 1) * height + 20
+            cv2.putText(combined_frame, f"Head {head_idx}", (10, y_pos), font, font_scale, color, thickness, cv2.LINE_AA)
+
+        return combined_frame
+
+    def _create_attention_overlay(self, image: np.ndarray, attention_map: np.ndarray, 
+                                  vmin: Optional[float] = None, vmax: Optional[float] = None) -> np.ndarray:
         """Create attention overlay on image."""
         # Resize attention map to match image size
         attention_resized = cv2.resize(attention_map, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
 
+        # Use provided vmin/vmax or compute from attention_resized
+        if vmin is None:
+            vmin = attention_resized.min()
+        if vmax is None:
+            vmax = attention_resized.max()
+        
         # Normalize to [0, 255]
-        if attention_resized.max() > attention_resized.min():
-            attention_normalized = ((attention_resized - attention_resized.min()) /
-                                   (attention_resized.max() - attention_resized.min() + 1e-8) * 255).astype(np.uint8)
+        if vmax > vmin:
+            attention_normalized = ((attention_resized - vmin) / (vmax - vmin + 1e-8) * 255).astype(np.uint8)
         else:
             attention_normalized = np.zeros_like(attention_resized, dtype=np.uint8)
 

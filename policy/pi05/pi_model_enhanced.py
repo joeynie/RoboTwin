@@ -21,7 +21,7 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
-from inference_attention_visualizer import InferenceAttentionVisualizer
+from visualizer import InferenceTripleVisualizer
 
 logger = logging.getLogger(__name__)
 
@@ -60,31 +60,23 @@ class PI0:
         self.observation_window = None
         self.pi0_step = pi0_step
         
-        # Attention visualization setup with InferenceAttentionVisualizer
+        # Attention/depth/skill visualization setup
         if self.extract_attention:
-            self.attn_visualizer = InferenceAttentionVisualizer(
+            self.attn_visualizer = InferenceTripleVisualizer(
                 output_dir=attn_save_dir,
                 save_every_n_calls=1,
                 layer_idx=layer_idx,
-                create_videos=True
             )
-            # Set attention visualization layer index on the model
-            self.policy._model.attention_viz_layer_idx = layer_idx
-            # Set up original images attribute for visualization
             self.policy._model.original_images_for_viz = None
-            # Wrap the model inside policy to enable automatic attention capture
-            self.policy._model = self.attn_visualizer.wrap_model(self.policy._model)
-            # Update policy's sample_actions reference to the wrapped version
-            if hasattr(self.policy, '_sample_actions'):
-                self.policy._sample_actions = self.policy._model.sample_actions
+            self.policy = self.attn_visualizer.wrap_policy(self.policy)
             layer_info = f"layer {layer_idx}" if layer_idx is not None else "last layer"
-            print(f"✓ Model wrapped for attention visualization ({layer_info})")
+            print(f"Policy wrapped for visualization ({layer_info})")
         else:
             self.attn_visualizer = None
         
         self.current_test_point = None
         self.frame_images = {}  # Store images for each view (for backward compatibility)
-        self._observation = None  # Store observation for InferenceAttentionVisualizer
+        self._observation = None  # Store observation for visualization
 
     # set img_size
     def set_img_size(self, img_size):
@@ -173,13 +165,12 @@ class PI0:
         """Start recording a new test point sequence."""
         self.current_test_point = test_point_id
         if self.attn_visualizer:
-            self.attn_visualizer.frames = []
-            self.attn_visualizer.tmp_frames = []
+            self.attn_visualizer.start_test_point(test_point_id)
             print(f"Started recording test point: {test_point_id}")
     
     def end_test_point(self):
         """End recording current test point."""
         if self.attn_visualizer and self.current_test_point:
-            self.attn_visualizer.save_summary_video()
+            self.attn_visualizer.end_test_point()
             print(f"Ended recording test point: {self.current_test_point}")
         self.current_test_point = None
