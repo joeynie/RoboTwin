@@ -13,3 +13,4 @@ checkpoint_id: /inspire/ssd/project/wuliqifa/zhousizhuo-240107010006/niexian/Rep
 pi0_step: 10
 extract_attention: True
 layer_idx: 10
+skill_task_name: beat_block_hammer

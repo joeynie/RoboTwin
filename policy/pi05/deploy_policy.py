@@ -37,6 +37,7 @@ def get_model(usr_args):
         extract_attention: Enable attention extraction (default: False)
         layer_idx: Layer index for attention visualization (0-indexed, None means last layer)
         attn_save_dir: Output directory for attention maps (default: "eval_result")
+        skill_task_name: Task name for resolving skill labels (optional)
     """
     train_config_name = usr_args["train_config_name"]
     model_name = usr_args["model_name"]
@@ -47,6 +48,7 @@ def get_model(usr_args):
     extract_attention = usr_args.get("extract_attention", False)
     layer_idx = usr_args.get("layer_idx", None)
     attn_save_dir = usr_args.get("attn_save_dir", "eval_result")
+    skill_task_name = usr_args.get("skill_task_name", None) or usr_args.get("task_name", None)
     
     return PI0(
         train_config_name=train_config_name,
@@ -55,7 +57,8 @@ def get_model(usr_args):
         pi0_step=pi0_step,
         extract_attention=extract_attention,
         layer_idx=layer_idx,
-        attn_save_dir=attn_save_dir
+        attn_save_dir=attn_save_dir,
+        skill_task_name=skill_task_name,
     )
 
 

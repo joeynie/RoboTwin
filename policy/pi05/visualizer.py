@@ -16,6 +16,30 @@ import numpy as np
 import torch
 
 
+SKILL_LABELS_BY_TASK: dict[str, list[str]] = {
+    "beat_block_hammer": ["Grasp L", "Grasp R", "Lift", "Beat"],
+    "click_bell": ["Move L", "Move R", "Click L", "Click R"],
+    "dump_bin_bigbin": ["Grasp R", "Place Mid", "Swap", "Grasp L", "Dump"],
+    "move_playingcard_away": ["Grasp L", "Grasp R", "Move L", "Move R"],
+    "lift_pot": ["Approach", "Lift"],
+    "place_burger_fries": ["Grasp", "Place L", "Place R"],
+    "place_can_basket": ["Can L", "Can R", "Place L", "Place R", "Basket L", "Basket R", "LiftB L", "LiftB R"],
+}
+
+
+def _resolve_skill_names(
+    task_name: Optional[str],
+    skill_names: Optional[list[str]],
+) -> Optional[list[str]]:
+    if skill_names:
+        return list(skill_names)
+    if task_name:
+        names = SKILL_LABELS_BY_TASK.get(task_name)
+        if names:
+            return list(names)
+    return None
+
+
 def _load_viz_helpers():
     if __package__:
         from . import viz_object_and_depth_attention as viz
@@ -75,7 +99,8 @@ class _SkillPlotter:
         self._fig, self._ax = plt.subplots(figsize=(6, 1.7), dpi=300)
         self._series: list[int] = []
         self._index_offset = index_offset
-        self._skill_names = skill_names or [
+        self._custom_names = bool(skill_names)
+        self._skill_names = list(skill_names) if skill_names else [
             "approach target",
             "interact at target",
             "transport with object",
@@ -88,10 +113,18 @@ class _SkillPlotter:
         self._series.append(int(skill_idx))
 
     def _ensure_names(self, num_classes: int) -> list[str]:
+        if self._custom_names:
+            return list(self._skill_names)
         names = list(self._skill_names)
         while len(names) < num_classes:
             names.append(f"Skill {len(names)}")
         return names[:num_classes]
+
+    def uses_custom_names(self) -> bool:
+        return self._custom_names
+
+    def num_custom_names(self) -> int:
+        return len(self._skill_names)
 
     def render(self, width: int, height: int, num_classes: int) -> np.ndarray:
         ax = self._ax
@@ -140,6 +173,8 @@ class InferenceTripleVisualizer:
         alpha: float = 0.4,
         layer_idx: Optional[int] = None,
         use_origin_branch: bool = False,
+        task_name: Optional[str] = None,
+        skill_names: Optional[list[str]] = None,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -154,7 +189,8 @@ class InferenceTripleVisualizer:
         self.writer: Optional[_VideoWriter] = None
         self.policy = None
         self.model = None
-        self.skill_plotter = _SkillPlotter()
+        resolved_skill_names = _resolve_skill_names(task_name, skill_names)
+        self.skill_plotter = _SkillPlotter(skill_names=resolved_skill_names)
         self.test_point_id: Optional[str] = None
         self._qk_hook: Optional[_QKCaptureHook] = None
         self._hook_handles: list[Any] = []
@@ -548,6 +584,8 @@ class InferenceTripleVisualizer:
             depth_heat = np.zeros_like(orig_views[0])
 
         num_classes = int(getattr(self.model, "skill_num_classes", 3))
+        if self.skill_plotter.uses_custom_names():
+            num_classes = self.skill_plotter.num_custom_names()
         if "skill_logits" in result:
             logits = np.asarray(result["skill_logits"]).reshape(-1)
             if logits.size > 0:

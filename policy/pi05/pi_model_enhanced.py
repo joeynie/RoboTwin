@@ -32,7 +32,8 @@ class PI0:
     def __init__(self, train_config_name, model_name, checkpoint_id, pi0_step,
         extract_attention: bool = False,
         layer_idx: Optional[int] = None,
-        attn_save_dir: str = "eval_result"
+        attn_save_dir: str = "eval_result",
+        skill_task_name: Optional[str] = None,
     ):
         """
         Args:
@@ -43,6 +44,7 @@ class PI0:
             extract_attention: Enable attention extraction
             layer_idx: Layer index for attention visualization (0-indexed, None means use the last layer)
             attn_save_dir: Output directory for attention maps
+            skill_task_name: Task name used to resolve skill labels for visualization
         """
         self.train_config_name = train_config_name
         self.model_name = model_name
@@ -67,6 +69,7 @@ class PI0:
                 output_dir=attn_save_dir,
                 save_every_n_calls=1,
                 layer_idx=layer_idx,
+                task_name=skill_task_name,
             )
             self.policy._model.original_images_for_viz = None
             self.policy = self.attn_visualizer.wrap_policy(self.policy)
