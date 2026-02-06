@@ -255,6 +255,40 @@ class InferenceAttentionVisualizer:
 
         return model
 
+    def wrap_policy(self, policy: Any) -> Any:
+        """Wrap a policy object (compatible with InferenceTripleVisualizer interface)."""
+        self.policy = policy
+        model = policy._model
+        
+        # Set up attributes before wrapping
+        model.attention_viz_layer_idx = self.layer_idx
+        model.original_images_for_viz = None
+        
+        # Wrap the model
+        self.wrap_model(model)
+        
+        # Update policy's _sample_actions reference to wrapped version
+        if hasattr(policy, '_sample_actions'):
+            policy._sample_actions = model.sample_actions
+        
+        return policy
+
+    def start_test_point(self, test_point_id: str) -> None:
+        """Start recording a new test point (reset counters and frames)."""
+        self.test_point_id = test_point_id
+        self.total_calls = 0
+        self.saved_count = 0
+        self.frames = []
+        self.tmp_frames = []
+        self.tmp_video_count = 0
+
+    def end_test_point(self) -> None:
+        """End recording and save final video."""
+        if hasattr(self, 'test_point_id') and self.test_point_id:
+            video_path = str(self.output_dir / f"viz_{self.test_point_id}.mp4")
+            self.save_summary_video(video_path)
+        self.test_point_id = None
+
     def _process_inference_sample(self, observation: Observation, actions: Any, inference_time: float):
         """Process a single inference sample for attention visualization."""
         self.total_calls += 1

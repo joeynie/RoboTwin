@@ -8,6 +8,7 @@ import math
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 import cv2
@@ -15,41 +16,31 @@ import numpy as np
 import torch
 
 
-def resize_with_pad(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Resize to target size without distortion by padding."""
-    cur_h, cur_w = image.shape[:2]
-    if cur_h == height and cur_w == width:
-        return image
-
-    ratio = max(cur_w / width, cur_h / height)
-    resized_h = int(cur_h / ratio)
-    resized_w = int(cur_w / ratio)
-    resized = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
-
-    if image.ndim == 3:
-        canvas = np.zeros((height, width, image.shape[2]), dtype=image.dtype)
+def _load_viz_helpers():
+    if __package__:
+        from . import viz_object_and_depth_attention as viz
     else:
-        canvas = np.zeros((height, width), dtype=image.dtype)
+        import os as _os
+        import sys as _sys
 
-    pad_h = max(0, (height - resized_h) // 2)
-    pad_w = max(0, (width - resized_w) // 2)
-    canvas[pad_h : pad_h + resized_h, pad_w : pad_w + resized_w] = resized
-    return canvas
+        script_dir = _os.path.dirname(_os.path.abspath(__file__))
+        if script_dir not in _sys.path:
+            _sys.path.insert(0, script_dir)
+        import viz_object_and_depth_attention as viz
+
+    return viz
 
 
 class _VideoWriter:
     def __init__(self, output_path: str, fps: int, frame_size: tuple[int, int]):
+        import imageio
         self.output_path = output_path
         self.fps = fps
         self.frame_size = frame_size  # (W, H)
-        self.backend = "cv2"
         self.writer = None
 
         os.makedirs(str(Path(output_path).parent), exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(output_path, fourcc, fps, frame_size)
-        if not self.writer.isOpened():
-            raise RuntimeError(f"Failed to open VideoWriter for: {output_path}")
+        self.writer = imageio.get_writer(output_path, fps=fps)
 
     def write(self, frame_rgb: np.ndarray) -> None:
         if frame_rgb.dtype != np.uint8:
@@ -57,12 +48,11 @@ class _VideoWriter:
         h, w = frame_rgb.shape[:2]
         if (w, h) != self.frame_size:
             frame_rgb = cv2.resize(frame_rgb, self.frame_size, interpolation=cv2.INTER_AREA)
-        frame_bgr = frame_rgb[:, :, ::-1]
-        self.writer.write(frame_bgr)
+        self.writer.append_data(frame_rgb)
 
     def close(self) -> None:
         if self.writer is not None:
-            self.writer.release()
+            self.writer.close()
 
 
 class _QKCaptureHook:
@@ -112,8 +102,7 @@ class _SkillPlotter:
             ax.set_axis_off()
             fig.tight_layout()
             fig.canvas.draw()
-            img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            img = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
             return cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
 
         frames = np.arange(1, len(self._series) + 1, dtype=np.int32)
@@ -127,6 +116,7 @@ class _SkillPlotter:
         ax.set_yticks(y_ticks)
         ax.set_yticklabels(names, fontsize=8)
         ax.set_ylim(self._index_offset - 0.5, self._index_offset + len(names) - 0.5)
+        ax.set_xlim(1, max(20, len(self._series)))
         ax.set_xlabel("Frame", fontsize=9, fontweight="bold")
         ax.set_ylabel("Skill", fontsize=9, fontweight="bold")
         ax.grid(True, axis="y", linestyle="-", linewidth=0.6, alpha=0.25)
@@ -136,8 +126,7 @@ class _SkillPlotter:
 
         fig.tight_layout()
         fig.canvas.draw()
-        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        img = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
         return cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
 
 
@@ -147,8 +136,8 @@ class InferenceTripleVisualizer:
         output_dir: str = "./inference_viz",
         save_every_n_calls: int = 1,
         image_size: tuple[int, int] = (224, 224),
-        fps: int = 10,
-        alpha: float = 0.35,
+        fps: int = 5,
+        alpha: float = 0.4,
         layer_idx: Optional[int] = None,
         use_origin_branch: bool = False,
     ):
@@ -170,9 +159,7 @@ class InferenceTripleVisualizer:
         self._qk_hook: Optional[_QKCaptureHook] = None
         self._hook_handles: list[Any] = []
         self._latest_depth_kv = None
-
-        self.num_images = 3
-        self.num_patches_per_image = 256
+        self._viz = None
 
     def wrap_policy(self, policy: Any) -> Any:
         self.policy = policy
@@ -180,7 +167,7 @@ class InferenceTripleVisualizer:
 
         if hasattr(policy, "_sample_kwargs"):
             policy._sample_kwargs["enable_attention_viz"] = True
-        if self.layer_idx is not None and hasattr(self.model, "attention_viz_layer_idx"):
+        if self.layer_idx is not None:
             self.model.attention_viz_layer_idx = self.layer_idx
 
         self._wrap_depth_cache(self.model)
@@ -252,40 +239,70 @@ class InferenceTripleVisualizer:
             target.register_forward_pre_hook(self._capture_depth_kwargs, with_kwargs=True)
         )
 
-    def _to_uint8_hwc(self, image: Any) -> np.ndarray:
-        if isinstance(image, torch.Tensor):
-            img = image.detach().cpu().numpy()
-        else:
-            img = np.asarray(image)
+    def _ensure_viz(self):
+        if self._viz is None:
+            self._viz = _load_viz_helpers()
+        return self._viz
 
-        if img.ndim == 4:
-            img = img[0]
-        if img.ndim == 3 and img.shape[0] in (1, 3, 4):
-            img = np.transpose(img, (1, 2, 0))
+    def _infer_device(self):
+        if self.model is None:
+            return torch.device("cpu")
+        try:
+            return next(self.model.parameters()).device
+        except Exception:
+            return torch.device("cpu")
 
-        if img.dtype != np.uint8:
-            if img.min() < 0:
-                img = ((img + 1.0) / 2.0 * 255.0).astype(np.uint8)
-            elif img.max() <= 1.0:
-                img = (img * 255.0).astype(np.uint8)
-            else:
-                img = np.clip(img, 0, 255).astype(np.uint8)
+    def _resolve_layer_idx(self, qk_states: Any) -> int:
+        if self.layer_idx is not None:
+            return int(self.layer_idx)
+        if isinstance(qk_states, (list, tuple)) and qk_states:
+            return max(int(li) for li, _ in qk_states)
+        return 0
 
-        target_h, target_w = self.image_size
-        if img.shape[0] != target_h or img.shape[1] != target_w:
-            img = resize_with_pad(img, target_h, target_w)
-        return img
+    def _build_viz_args(self, layer_idx: int):
+        depth_model_name = None
+        if self.model is not None and hasattr(self.model, "config"):
+            depth_model_name = getattr(self.model.config, "depth_model_name", None)
+        return SimpleNamespace(
+            layer_idx=layer_idx,
+            head_idx=None,
+            head_agg="mean",
+            action_agg="mean",
+            action_step=-1,
+            mapping="reshape_or_interpolate",
+            colormap="magma",
+            object_colormap="jet",
+            alpha=self.alpha,
+            depth_model_name=depth_model_name,
+            depth_viz_mode="predicted",
+            depth_feature_idx=-1,
+            depth_colormap="spectral_r",
+            norm="per_image",
+            attn_gamma=1.0,
+            attn_clip_percentile=None,
+            object_head_idx=0,
+            object_view_idx=0,
+        )
 
-    def _get_base_image(self, obs: dict) -> np.ndarray:
+    def _resize_rgb(self, image_rgb: np.ndarray, target_hw: tuple[int, int]) -> np.ndarray:
+        if image_rgb.shape[:2] == target_hw:
+            return image_rgb
+        return cv2.resize(image_rgb, (target_hw[1], target_hw[0]), interpolation=cv2.INTER_AREA)
+
+    def _get_image_raw(self, obs: dict, key: str):
         images = {}
         if self.model is not None and getattr(self.model, "original_images_for_viz", None):
             images = self.model.original_images_for_viz
-        base = images.get("cam_high")
-        if base is None:
-            base = obs.get("images", {}).get("cam_high")
-        if base is None:
-            base = np.zeros((*self.image_size, 3), dtype=np.uint8)
-        return self._to_uint8_hwc(base)
+        if key in images:
+            return images[key]
+        return obs.get("images", {}).get(key)
+
+    def _as_bhwc_uint8(self, image: Any) -> np.ndarray:
+        viz = self._ensure_viz()
+        if image is None:
+            h, w = self.image_size
+            return np.zeros((1, h, w, 3), dtype=np.uint8)
+        return viz._to_uint8(viz._ensure_bhwc(viz._as_numpy(image)))
 
     def _get_qk_states(self):
         if self.model is None:
@@ -343,96 +360,123 @@ class InferenceTripleVisualizer:
                 attn[int(layer_idx)] = attn_probs
         return attn
 
-    def _attention_map(self, qk_states: Any) -> Optional[np.ndarray]:
-        attn_by_layer = self._collect_attention(qk_states)
-        if not attn_by_layer:
-            return None
-        if self.layer_idx is None:
-            layer_idx = sorted(attn_by_layer.keys())[-1]
+    def _compute_object_attention_3views(self, qk_states: Any, layer_idx: int) -> list[np.ndarray]:
+        """Compute object attention for all 3 views (head 0,1 average, last action token)."""
+        # Get attention for the specified layer
+        qk_data = None
+        for li, data in qk_states:
+            if li == layer_idx:
+                qk_data = data
+                break
+        if qk_data is None:
+            return [np.zeros(256) for _ in range(3)]
+        
+        # Get attention probs
+        attn_probs = None
+        if self.use_origin_branch:
+            attn_probs = qk_data.get("attention_probs_origin")
+        if attn_probs is None:
+            attn_probs = qk_data.get("attention_probs")
+        
+        # Fallback: compute from Q/K
+        if attn_probs is None and "attention" in qk_data:
+            q, k = qk_data["attention"]
+            if isinstance(q, torch.Tensor) and isinstance(k, torch.Tensor):
+                head_dim = q.shape[-1]
+                scaling = 1.0 / math.sqrt(head_dim)
+                scores = torch.matmul(q, k.transpose(-2, -1)) * scaling
+                attn_probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
+        
+        if attn_probs is None:
+            return [np.zeros(256) for _ in range(3)]
+        
+        # attn_probs: [B, H, seq_len, seq_len]
+        attn = attn_probs[0]  # [H, seq_len, seq_len]
+        
+        # Select heads 0 and 1, average them
+        num_heads = attn.shape[0]
+        head_indices = [h for h in [0, 1] if h < num_heads]
+        if head_indices:
+            attn = attn[head_indices].mean(dim=0)  # [seq_len, seq_len]
         else:
-            layer_idx = self.layer_idx
-        if layer_idx not in attn_by_layer:
-            return None
+            attn = attn.mean(dim=0)
+        
+        # Take last row (last action token → all keys), slice first 768 (image tokens)
+        last_action_attn = attn[-1]  # [seq_len]
+        total_image_tokens = 768  # 3 views × 256 patches
+        
+        if last_action_attn.shape[0] >= total_image_tokens:
+            image_attn = last_action_attn[:total_image_tokens].cpu().numpy()
+        else:
+            image_attn = last_action_attn.cpu().numpy()
+            image_attn = np.pad(image_attn, (0, total_image_tokens - len(image_attn)))
+        
+        # Split into 3 views
+        return [image_attn[i * 256 : (i + 1) * 256] for i in range(3)]
 
-        layer_attn = attn_by_layer[layer_idx]
-        if isinstance(layer_attn, torch.Tensor):
-            layer_attn = layer_attn.detach()
-        layer_attn = layer_attn[0]  # [num_heads, seq_len, seq_len]
-        seq_len = layer_attn.shape[-1]
-        image_tokens_end = min(self.num_images * self.num_patches_per_image, seq_len)
-        last_action_idx = seq_len - 1
-
-        attn = layer_attn[:, last_action_idx, :image_tokens_end]
-        attn = attn.mean(dim=0)
-        attn = attn[: self.num_images * self.num_patches_per_image]
-        if attn.numel() != self.num_images * self.num_patches_per_image:
-            return None
-        attn = attn.view(self.num_images, 16, 16)[0]
-        return attn.cpu().numpy()
-
-    def _overlay(self, image: np.ndarray, attn_map: np.ndarray, colormap: int) -> np.ndarray:
-        attn_resized = cv2.resize(attn_map, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
-        vmin, vmax = float(attn_resized.min()), float(attn_resized.max())
+    def _create_attention_overlay(
+        self,
+        image: np.ndarray,
+        attention_map: np.ndarray,
+        vmin: float,
+        vmax: float,
+    ) -> np.ndarray:
+        """Create attention overlay on image (same logic as inference_attention_visualizer)."""
+        # attention_map: [16, 16] or [256]
+        if attention_map.ndim == 1:
+            side = int(np.sqrt(attention_map.shape[0]))
+            attention_map = attention_map.reshape(side, side)
+        
+        # Resize attention map to match image size
+        attention_resized = cv2.resize(
+            attention_map.astype(np.float32),
+            (image.shape[1], image.shape[0]),
+            interpolation=cv2.INTER_LINEAR
+        )
+        
+        # Normalize using global vmin/vmax
         if vmax > vmin:
-            attn_norm = ((attn_resized - vmin) / (vmax - vmin) * 255.0).astype(np.uint8)
+            attention_normalized = ((attention_resized - vmin) / (vmax - vmin + 1e-8) * 255).astype(np.uint8)
         else:
-            attn_norm = np.zeros_like(attn_resized, dtype=np.uint8)
-        heat = cv2.applyColorMap(attn_norm, colormap)
-        return cv2.addWeighted(image, 1.0 - self.alpha, heat, self.alpha, 0)
-
-    def _depth_views(self, depth_kv: Any, base_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        depth_kv = self._extract_depth_tensor(depth_kv)
-        if depth_kv is None:
-            blank = np.zeros_like(base_image)
-            return blank, blank
-
-        if isinstance(depth_kv, (tuple, list)):
-            depth_kv = depth_kv[0]
-        depth = torch.as_tensor(depth_kv).float()
-        while depth.ndim > 2:
-            depth = depth.mean(dim=0)
-        if depth.ndim == 2:
-            depth = depth.mean(dim=-1)
-        depth = depth.flatten()
-        n = depth.numel()
-        side = int(math.sqrt(n))
-        if side * side == n:
-            depth_map = depth.view(side, side)
-        else:
-            depth_map = depth.view(1, -1)
-        depth_map = depth_map.detach().cpu().numpy()
-        depth_map = cv2.resize(depth_map, (base_image.shape[1], base_image.shape[0]), interpolation=cv2.INTER_LINEAR)
-
-        vmin, vmax = float(depth_map.min()), float(depth_map.max())
-        if vmax > vmin:
-            depth_norm = ((depth_map - vmin) / (vmax - vmin) * 255.0).astype(np.uint8)
-        else:
-            depth_norm = np.zeros_like(depth_map, dtype=np.uint8)
-
-        depth_base = cv2.applyColorMap(depth_norm, cv2.COLORMAP_BONE)
-        depth_heat = cv2.applyColorMap(depth_norm, cv2.COLORMAP_MAGMA)
-        return depth_base, depth_heat
+            attention_normalized = np.zeros_like(attention_resized, dtype=np.uint8)
+        
+        # Apply JET colormap
+        attention_colored = cv2.applyColorMap(attention_normalized, cv2.COLORMAP_JET)
+        # Convert BGR to RGB
+        attention_colored = attention_colored[:, :, ::-1]
+        
+        # Blend with alpha
+        overlay = cv2.addWeighted(image, 1 - self.alpha, attention_colored, self.alpha, 0)
+        return overlay
 
     def _compose_frame(
         self,
-        base: np.ndarray,
-        attn: np.ndarray,
-        depth_base: np.ndarray,
-        depth_heat: np.ndarray,
+        orig_views: list[np.ndarray],
+        attn_views: list[np.ndarray],
         skill_img: np.ndarray,
+        depth_color: np.ndarray,
+        depth_heat: np.ndarray,
     ) -> np.ndarray:
-        h, w = base.shape[:2]
-        grid = np.zeros((h * 2, w * 2, 3), dtype=np.uint8)
-        grid[0:h, 0:w] = base
-        grid[0:h, w : w * 2] = attn
-        grid[h : h * 2, 0:w] = depth_base
-        grid[h : h * 2, w : w * 2] = depth_heat
-
-        if skill_img.shape[1] != w * 2:
-            skill_img = cv2.resize(skill_img, (w * 2, skill_img.shape[0]), interpolation=cv2.INTER_AREA)
-        final = np.zeros((grid.shape[0] + skill_img.shape[0], grid.shape[1], 3), dtype=np.uint8)
-        final[: grid.shape[0]] = grid
-        final[grid.shape[0] :] = skill_img
+        """Compose frame with 3x2 grid (orig/attn for 3 views) + bottom row (skill, depth_color, depth_heat)."""
+        h, w = orig_views[0].shape[:2]
+        
+        # Top 2 rows: 3 columns
+        top_grid = np.zeros((h * 2, w * 3, 3), dtype=np.uint8)
+        for i, (orig, attn) in enumerate(zip(orig_views, attn_views)):
+            top_grid[0:h, i * w : (i + 1) * w] = orig
+            top_grid[h : h * 2, i * w : (i + 1) * w] = attn
+        
+        # Bottom row: skill | depth_color | depth_heat
+        bottom_row = np.zeros((h, w * 3, 3), dtype=np.uint8)
+        skill_resized = cv2.resize(skill_img, (w, h), interpolation=cv2.INTER_AREA)
+        bottom_row[0:h, 0:w] = skill_resized
+        bottom_row[0:h, w : w * 2] = depth_color
+        bottom_row[0:h, w * 2 : w * 3] = depth_heat
+        
+        # Combine
+        final = np.zeros((h * 3, w * 3, 3), dtype=np.uint8)
+        final[0 : h * 2] = top_grid
+        final[h * 2 : h * 3] = bottom_row
         return final
 
     def maybe_visualize(self, obs: dict, result: dict) -> None:
@@ -443,14 +487,65 @@ class InferenceTripleVisualizer:
         if self.model is None:
             return
 
-        base = self._get_base_image(obs)
+        viz = self._ensure_viz()
         qk_states = self._get_qk_states()
-        attn_map = self._attention_map(qk_states)
-        if attn_map is None:
+        if qk_states is None:
             return
+        layer_idx = self._resolve_layer_idx(qk_states)
+        viz_args = self._build_viz_args(layer_idx)
 
-        attn_overlay = self._overlay(base, attn_map, cv2.COLORMAP_JET)
-        depth_base, depth_heat = self._depth_views(self._get_depth_kv(), base)
+        base_raw = self._get_image_raw(obs, "cam_high")
+        base_bhwc_uint8 = self._as_bhwc_uint8(base_raw)
+
+        depth_viz = None
+        depth_kv = self._get_depth_kv()
+        if depth_kv is not None:
+            depth_attn = viz._compute_depth_attention_from_qk(
+                self.model, qk_states, viz_args.layer_idx, depth_kv=depth_kv
+            )
+            depth_viz = viz.compute_overlay_for_sample(
+                attn=depth_attn,
+                image_bhwc_uint8=base_bhwc_uint8,
+                input_npz=None,
+                meta={},
+                args=viz_args,
+                device=self._infer_device(),
+                batch_idx=0,
+            )
+
+        # Compute object attention tokens for all 3 views using consistent logic
+        view_keys = ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+        view_tokens = self._compute_object_attention_3views(qk_states, layer_idx)
+
+        # Global min/max for normalization (same as inference_attention_visualizer)
+        all_tokens = np.concatenate([t.flatten() for t in view_tokens])
+        global_min, global_max = float(all_tokens.min()), float(all_tokens.max())
+
+        # Get all 3 view images and their overlays using our own overlay logic
+        orig_views = []
+        attn_views = []
+        for view_idx, key in enumerate(view_keys):
+            img_bhwc = self._as_bhwc_uint8(self._get_image_raw(obs, key))
+            img_rgb = img_bhwc[0]  # [H, W, 3]
+            overlay = self._create_attention_overlay(
+                img_rgb, view_tokens[view_idx], global_min, global_max
+            )
+            orig_views.append(img_rgb)
+            attn_views.append(overlay)
+
+        cell_h, cell_w = orig_views[0].shape[:2]
+        
+        # Resize all views to same size
+        orig_views = [self._resize_rgb(v, (cell_h, cell_w)) for v in orig_views]
+        attn_views = [self._resize_rgb(v, (cell_h, cell_w)) for v in attn_views]
+
+        # Depth visualization
+        if depth_viz is not None:
+            depth_color = self._resize_rgb(depth_viz["base_rgb"], (cell_h, cell_w))
+            depth_heat = self._resize_rgb(depth_viz["heatmap_color"], (cell_h, cell_w))
+        else:
+            depth_color = orig_views[0]
+            depth_heat = np.zeros_like(orig_views[0])
 
         num_classes = int(getattr(self.model, "skill_num_classes", 3))
         if "skill_logits" in result:
@@ -458,8 +553,8 @@ class InferenceTripleVisualizer:
             if logits.size > 0:
                 self.skill_plotter.update(int(np.argmax(logits)))
 
-        skill_img = self.skill_plotter.render(base.shape[1] * 2, base.shape[0] // 2, num_classes)
-        frame = self._compose_frame(base, attn_overlay, depth_base, depth_heat, skill_img)
+        skill_img = self.skill_plotter.render(cell_w, cell_h, num_classes)
+        frame = self._compose_frame(orig_views, attn_views, skill_img, depth_color, depth_heat)
 
         if self.writer is None:
             stamp = self.test_point_id or time.strftime("%Y%m%d_%H%M%S")

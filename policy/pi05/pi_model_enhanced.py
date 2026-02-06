@@ -21,6 +21,7 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
+# from inference_attention_visualizer import InferenceAttentionVisualizer as InferenceTripleVisualizer
 from visualizer import InferenceTripleVisualizer
 
 logger = logging.getLogger(__name__)
